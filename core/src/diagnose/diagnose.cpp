@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <exception>
 #include <map>
 #include <set>
 
@@ -163,7 +164,7 @@ class Diagnoser {
     const bool rar = head.size() >= 4 && head[0] == 'R' && head[1] == 'a' && head[2] == 'r' && head[3] == '!';
     const bool seven_zip = head.size() >= 2 && head[0] == '7' && head[1] == 'z';
 
-    if (r.error == pe::ParseError::NotPe && is_16bit(head)) {
+    if ((r.error == pe::ParseError::NotPe || r.error == pe::ParseError::BadPeOffset) && is_16bit(program, head)) {
       f.rule = "16bit-program";
       f.title = Tr{"This is a 16-bit (DOS / Windows 3.x) program", "Bu 16-bit (DOS / Windows 3.x) bir program"}(lang_);
       f.explanation = Tr{"64-bit Windows cannot run 16-bit programs at all. This is not something a missing file can "
@@ -223,12 +224,30 @@ class Diagnoser {
     findings_.push_back(std::move(f));
   }
 
-  static bool is_16bit(const std::vector<std::uint8_t>& head) {
-    if (head.size() < 0x40 || head[0] != 'M' || head[1] != 'Z') return false;
-    const std::uint32_t lfanew = head[0x3C] | (head[0x3D] << 8) | (head[0x3E] << 16) | (static_cast<std::uint32_t>(head[0x3F]) << 24);
-    if (lfanew == 0 || lfanew + 2 > head.size()) return true;  // plain MZ (DOS) program
-    const char a = static_cast<char>(head[lfanew]), b = static_cast<char>(head[lfanew + 1]);
-    return a == 'N' && b == 'E';
+  // A DOS / Windows 3.x program is either a plain MZ executable (relocation table offset e_lfarlc below
+  // 0x40, so there is no "new header" pointer at all) or an MZ stub followed by an NE header at e_lfanew.
+  // A corrupt PE (valid-looking DOS header, e_lfarlc >= 0x40, e_lfanew pointing nowhere or at garbage)
+  // is NOT 16-bit.
+  bool is_16bit(const std::filesystem::path& program, const std::vector<std::uint8_t>& head) const {
+    if (head.size() < 0x1A || head[0] != 'M' || head[1] != 'Z') return false;
+    const std::uint32_t lfarlc = head[0x18] | (head[0x19] << 8);
+    if (lfarlc < 0x40) return true;  // plain DOS program, whatever bytes 0x3C.. hold
+    if (head.size() < 0x40) return false;
+    const std::uint64_t lfanew = head[0x3C] | (head[0x3D] << 8) | (head[0x3E] << 16) |
+                                 (static_cast<std::uint64_t>(head[0x3F]) << 24);
+    constexpr std::uint64_t kMaxProbe = 16ull * 1024 * 1024;  // NE headers sit near the start of the file
+    if (lfanew < 0x40 || lfanew + 2 > kMaxProbe) return false;
+    std::vector<std::uint8_t> probe;
+    const std::vector<std::uint8_t>* data = &head;
+    if (lfanew + 2 > head.size()) {
+      auto more = env_.read_file(program, lfanew + 2);  // the real file, not just the 4 KB head
+      if (!more) return false;
+      probe = std::move(*more);
+      data = &probe;
+    }
+    if (lfanew + 2 > data->size()) return false;
+    const auto at = static_cast<std::size_t>(lfanew);  // <= 16 MB, fits on x86
+    return (*data)[at] == 'N' && (*data)[at + 1] == 'E';
   }
 
   void incomplete_file() {
@@ -281,7 +300,12 @@ class Diagnoser {
     bool runnable = true;
     switch (process) {
       case pe::Machine::I386: break;
-      case pe::Machine::AMD64: runnable = os.is_64bit; needed = Tr{"64-bit (x64) Windows", "64-bit (x64) Windows"}(lang_); break;
+      case pe::Machine::AMD64:
+        // ARM64 Windows runs x64 programs only from Windows 11 (build 22000) on; Windows 10 on ARM emulates x86 only.
+        runnable = os.is_64bit && (!os.is_arm64 || os.build >= 22000);
+        needed = os.is_arm64 ? Tr{"64-bit (x64) Windows, or Windows 11 on ARM", "64-bit (x64) Windows ya da ARM işlemcili Windows 11"}(lang_)
+                             : Tr{"64-bit (x64) Windows", "64-bit (x64) Windows"}(lang_);
+        break;
       case pe::Machine::ARM64: runnable = os.is_arm64; needed = Tr{"Windows on ARM", "ARM işlemcili Windows"}(lang_); break;
       case pe::Machine::ARMNT: runnable = os.is_arm64 && os.build < 26100; needed = Tr{"Windows on ARM (32-bit ARM apps)", "ARM işlemcili Windows (32-bit ARM uygulamaları)"}(lang_); break;
       case pe::Machine::IA64: runnable = false; needed = Tr{"Itanium Windows (no longer exists)", "Itanium Windows (artık yok)"}(lang_); break;
@@ -609,7 +633,7 @@ class Diagnoser {
     std::size_t shown = 0;
     for (const auto& mf : m.missing_functions) {
       if (shown++ == 5) {
-        f.evidence.push_back("... +" + std::to_string(m.missing_functions.size() - 5));
+        f.evidence.push_back("... +" + std::to_string(m.missing_functions.size() - 5 + m.missing_functions_omitted));
         break;
       }
       f.evidence.push_back(format(Tr{"{0} not found in {1} (needed by {2})", "{0}, {1} içinde yok ({2} istiyor)"}(lang_),
@@ -703,9 +727,7 @@ class Diagnoser {
       ordinals.insert(e.ordinal);
     }
     return std::all_of(functions.begin(), functions.end(), [&](const resolve::MissingFunction& f) {
-      if (!f.function.empty() && f.function[0] == '#') {
-        return ordinals.count(static_cast<std::uint32_t>(std::stoul(f.function.substr(1)))) > 0;
-      }
+      if (f.by_ordinal) return ordinals.count(f.ordinal) > 0;
       return names.count(f.function) > 0;
     });
   }
@@ -756,25 +778,37 @@ class Diagnoser {
 
   // ---- Rule 10: .NET 5 and later (program.runtimeconfig.json) -------------------
 
-  static std::vector<int> version_parts(std::string_view v) {
-    std::vector<int> parts;
-    int cur = 0;
+  struct DotnetVersion {
+    std::vector<std::uint64_t> parts;  // at least 3 numbers
+    bool prerelease = false;           // "8.0.0-rc.1"
+  };
+
+  static DotnetVersion version_parts(std::string_view v) {
+    DotnetVersion out;
+    std::uint64_t cur = 0;
     bool any = false;
     for (const char c : v) {
       if (c >= '0' && c <= '9') {
-        cur = cur * 10 + (c - '0');
+        if (cur < 1000000000ull) cur = cur * 10 + static_cast<std::uint64_t>(c - '0');  // saturates, no overflow
         any = true;
       } else if (c == '.') {
-        parts.push_back(cur);
+        out.parts.push_back(cur);
         cur = 0;
         any = false;
       } else {
-        break;  // prerelease suffix ("-rc.1") is ignored
+        out.prerelease = c == '-';  // "-rc.1" / "-preview.3"; the suffix itself is not compared
+        break;
       }
     }
-    if (any) parts.push_back(cur);
-    while (parts.size() < 3) parts.push_back(0);
-    return parts;
+    if (any) out.parts.push_back(cur);
+    while (out.parts.size() < 3) out.parts.push_back(0);
+    return out;
+  }
+
+  // Release > prerelease of the same numbers.
+  static bool version_less(const DotnetVersion& a, const DotnetVersion& b) {
+    if (a.parts != b.parts) return a.parts < b.parts;
+    return a.prerelease && !b.prerelease;
   }
 
   void dotnet(const std::filesystem::path& program) {
@@ -795,6 +829,8 @@ class Diagnoser {
     std::string roll = "Minor";
     if (const json::Value* r = options->find("rollForward")) roll = r->as_string();
     const bool any_major = roll == "Major" || roll == "LatestMajor";
+    const bool disable = roll == "Disable";            // exactly the requested version
+    const bool same_minor = roll == "LatestPatch";     // same major.minor, newest patch
 
     const auto installed = env_.dotnet_frameworks();
     for (const json::Value* fw : frameworks) {
@@ -803,14 +839,16 @@ class Diagnoser {
       if (!name_v || !version_v) continue;
       const std::string& name = name_v->as_string();
       const std::string& version = version_v->as_string();
-      const std::vector<int> want = version_parts(version);
+      const DotnetVersion want = version_parts(version);
 
       bool ok = false;
       for (const auto& inst : installed) {
         if (inst.name != name || inst.arch != arch_) continue;
-        const std::vector<int> have = version_parts(inst.version);
-        if (have < want) continue;
-        if (!any_major && have[0] != want[0]) continue;
+        const DotnetVersion have = version_parts(inst.version);
+        if (version_less(have, want)) continue;
+        if (disable && have.parts != want.parts) continue;
+        if (same_minor && (have.parts[0] != want.parts[0] || have.parts[1] != want.parts[1])) continue;
+        if (!any_major && have.parts[0] != want.parts[0]) continue;
         ok = true;
         break;
       }
@@ -818,7 +856,7 @@ class Diagnoser {
 
       Finding f;
       f.rule = "dotnet-runtime";
-      const std::string major = std::to_string(want[0]);
+      const std::string major = std::to_string(want.parts[0]);
       const bool desktop = name == "Microsoft.WindowsDesktop.App" || name == "Microsoft.NETCore.App";
       f.title = format(Tr{"Missing: .NET {0} {1} ({2})", "Eksik: .NET {0} {1} ({2})"}(lang_),
                        {major, desktop ? "Desktop Runtime" : name, arch_});
@@ -957,9 +995,46 @@ bool Report::has_errors() const {
   return std::any_of(findings.begin(), findings.end(), [](const Finding& f) { return f.severity == Severity::Error; });
 }
 
+namespace {
+
+// std::bad_alloc or any other failure while analysing: report "could not analyse" instead of terminating.
+Report failed_report(const std::filesystem::path& program, const env::Environment& env, Lang lang,
+                     const char* what) noexcept {
+  Report report;
+  try {
+    report.program = program;
+    report.lang = lang;
+    report.os = os_string(env.os());
+    report.resolution.target_path = program;
+    report.resolution.target.error = pe::ParseError::IoError;
+    report.resolution.target.detail = std::string("could not analyse the file: ") + what;
+    Finding f;
+    f.rule = "analysis-failed";
+    f.severity = Severity::Warning;
+    f.certain = false;
+    f.title = Tr{"The file could not be analysed", "Dosya analiz edilemedi"}(lang);
+    f.explanation = Tr{"An unexpected error (for example, not enough memory for a very large or unusual file) stopped "
+                       "the analysis. No conclusion can be drawn.",
+                       "Beklenmeyen bir hata (örneğin çok büyük ya da olağandışı bir dosya için yetersiz bellek) "
+                       "analizi durdurdu. Bir sonuca varılamıyor."}(lang);
+    f.evidence.push_back(what);
+    report.findings.push_back(std::move(f));
+  } catch (...) {
+  }
+  return report;
+}
+
+}  // namespace
+
 Report diagnose(const std::filesystem::path& program, const env::Environment& env, const kb::KnowledgeBase& kb,
                 Lang lang) {
-  return Diagnoser(env, kb, lang).run(program);
+  try {
+    return Diagnoser(env, kb, lang).run(program);
+  } catch (const std::exception& e) {
+    return failed_report(program, env, lang, e.what());
+  } catch (...) {
+    return failed_report(program, env, lang, "unexpected error");
+  }
 }
 
 std::string to_json(const Report& r) {

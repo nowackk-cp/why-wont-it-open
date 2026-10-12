@@ -36,6 +36,7 @@ class MainWindow {
 
   void choose_file();
   void open_file(std::wstring path);
+  void refuse_network_path(const std::wstring& path);
   void start_diagnosis(const std::wstring& path);
   void on_diagnosis_done(LPARAM lp);
   void on_action(size_t card, Action action);

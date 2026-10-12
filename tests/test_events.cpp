@@ -445,12 +445,49 @@ TEST(defender_ignores_other_programs) {
   env.event_log.push_back(defender_event(1117, "2026-10-10T10:00:05Z", "Trojan:X", "file:_C:\\Games\\OtherGame\\a.dll"));
   env.event_log.push_back(defender_event(1117, "2026-10-10T10:00:05Z", "Trojan:Y", "file:_C:\\Games\\MyGame2\\a.dll"));
   CHECK(find_rule(run(env), "defender-quarantine") == nullptr);
-  // A file inside the program folder (even if it is not the exe) counts.
+  // A file that merely sits in the program folder (not the exe, not one of its modules) is not ours either.
   env.event_log.push_back(defender_event(1116, "2026-10-10T10:00:05Z", "Trojan:Z", "file:_C:\\Games\\MyGame\\data\\mod.dll"));
+  CHECK(find_rule(run(env), "defender-quarantine") == nullptr);
+  // The program's own exe counts.
+  env.event_log.push_back(defender_event(1116, "2026-10-10T10:00:05Z", "Trojan:Z", "file:_C:\\Games\\MyGame\\game.exe"));
   const Report rep_ = run(env);
   const Finding* f = find_rule(rep_, "defender-quarantine");
   REQUIRE(f != nullptr);
   CHECK(contains(f->title, "detected"));  // detection only, no recorded action
+}
+
+TEST(defender_unrelated_file_in_downloads_is_ignored) {
+  // The program itself lives in Downloads, next to many other downloads.
+  const std::filesystem::path downloads = "C:\\Users\\me\\Downloads";
+  const std::filesystem::path exe = downloads / "tool.exe";
+  FakeEnvironment env;
+  env.now_filetime = kNow;
+  env.add_file(kWow / "kernel32.dll", dll_bytes("KERNEL32.dll", {"ExitProcess"}));
+  env.add_file(exe, exe_bytes({{"KERNEL32.dll", {"ExitProcess"}}}));
+  env.event_log.push_back(defender_event(1117, "2026-10-10T10:00:05Z", "Trojan:Unrelated",
+                                         "file:_C:\\Users\\me\\Downloads\\keygen.exe"));
+  const auto kb = &neden::kb::KnowledgeBase::embedded();
+  CHECK(find_rule(neden::diagnose::diagnose(exe, env, *kb, Lang::En), "defender-quarantine") == nullptr);
+
+  env.event_log.push_back(defender_event(1117, "2026-10-10T10:00:06Z", "Trojan:Ours",
+                                         "file:_C:\\Users\\me\\Downloads\\tool.exe"));
+  CHECK(find_rule(neden::diagnose::diagnose(exe, env, *kb, Lang::En), "defender-quarantine") != nullptr);
+}
+
+TEST(defender_programs_own_dll_matches_but_not_on_another_drive) {
+  FakeEnvironment env = machine();
+  env.add_file(kExe, exe_bytes({{"KERNEL32.dll", {"ExitProcess"}}, {"foo.dll", {"f"}}}));
+  env.add_file(kApp / "foo.dll", dll_bytes("foo.dll", {"f"}));
+  // Same folder and file name, but on D: - not this program.
+  env.event_log.push_back(defender_event(1117, "2026-10-10T10:00:05Z", "Trojan:OtherDrive", "file:_D:\\Games\\MyGame\\foo.dll"));
+  CHECK(find_rule(run(env), "defender-quarantine") == nullptr);
+
+  env.event_log.push_back(defender_event(1117, "2026-10-10T10:00:05Z", "Trojan:Ours", "file:_C:\\Games\\MyGame\\foo.dll"));
+  const Report r = run(env);
+  const Finding* d = find_rule(r, "defender-quarantine");
+  REQUIRE(d != nullptr);
+  CHECK(evidence_has(*d, "Trojan:Ours"));
+  CHECK(!evidence_has(*d, "OtherDrive"));
 }
 
 // ---- Rule 9: Smart App Control -----------------------------------------------------
@@ -491,6 +528,23 @@ TEST(sac_ignores_unrelated_and_noisy_events) {
   EventRecord noisy = ci_block("2026-10-11T10:00:00Z", "\\Device\\HarddiskVolume3\\Games\\MyGame\\game.exe", "x");
   noisy.id = 3033;
   env.event_log.push_back(noisy);
+  CHECK(find_rule(run(env), "code-integrity-block") == nullptr);
+}
+
+TEST(sac_device_paths_must_be_on_the_programs_volume_when_the_mapping_is_known) {
+  FakeEnvironment env = machine();
+  env.sac_state = 1;
+  env.device_paths = {{'c', "\\Device\\HarddiskVolume3"}};
+  env.event_log.push_back(ci_block("2026-10-11T10:00:00Z", "\\Device\\HarddiskVolume5\\Games\\MyGame\\game.exe", "x"));
+  CHECK(find_rule(run(env), "code-integrity-block") == nullptr);  // another volume
+  env.event_log.push_back(ci_block("2026-10-11T10:00:00Z", "\\Device\\HarddiskVolume3\\Games\\MyGame\\game.exe", "x"));
+  CHECK(find_rule(run(env), "code-integrity-block") != nullptr);
+}
+
+TEST(sac_unrelated_file_in_program_folder_is_ignored) {
+  FakeEnvironment env = machine();
+  env.sac_state = 1;
+  env.event_log.push_back(ci_block("2026-10-11T10:00:00Z", "\\Device\\HarddiskVolume3\\Games\\MyGame\\installer.exe", "x"));
   CHECK(find_rule(run(env), "code-integrity-block") == nullptr);
 }
 

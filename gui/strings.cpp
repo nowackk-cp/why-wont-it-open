@@ -74,6 +74,10 @@ const Entry kTable[] = {
      L"Bu, DLL'in bilgi tabanına eklenebilmesi için tarayıcınızda yeni bir GitHub issue açar.\n\n"
      L"Yalnızca şu dosya adları eklenir; sizinle ya da bilgisayarınızla ilgili başka hiçbir şey eklenmez:\n\n%s\n\n"
      L"Göndermeden önce issue'yu inceleyip düzenleyebilirsiniz."},
+    {L"This tool only analyses files on this computer, and this one is on a network location:\n\n%1\n\n"
+     L"Copy the file to a local folder (for example Downloads) and drop it here again.",
+     L"Bu araç yalnızca bu bilgisayardaki dosyaları inceler; bu dosya ise bir ağ konumunda:\n\n%1\n\n"
+     L"Dosyayı bu bilgisayardaki bir klasöre (örneğin İndirilenler) kopyalayıp yeniden buraya bırakın."},
 };
 static_assert(sizeof(kTable) / sizeof(kTable[0]) == static_cast<size_t>(S::Count_), "string table out of sync");
 

@@ -3,6 +3,7 @@
 // machines that lack a runtime (CI runners have every runtime installed).
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -90,6 +91,13 @@ class Environment {
   // Smart App Control: 0 off, 1 on (enforcing), 2 evaluation mode, -1 unknown
   // (also: Windows older than 11 22H2, where the setting does not exist).
   virtual int smart_app_control_state() const = 0;
+
+  // NT device name of a drive letter (QueryDosDevice), e.g. 'C' -> "\Device\HarddiskVolume3". Empty if unknown.
+  // Used to tell whether an event's "\Device\HarddiskVolumeN\..." path is on the program's drive.
+  virtual std::string device_path_of_drive(char letter) const {
+    (void)letter;
+    return {};
+  }
 };
 
 // The machine we are running on. Handles WOW64 (Sysnative, KEY_WOW64_64KEY).
@@ -111,6 +119,7 @@ class FakeEnvironment : public Environment {
   std::vector<EventRecord> event_log;                 // events()/now() are simulated from this
   std::uint64_t now_filetime = 134000000000000000ull;  // ~ mid 2025; tests set an explicit date
   int sac_state = -1;
+  std::vector<std::pair<char, std::string>> device_paths;  // drive letter (lower-case) -> "\Device\HarddiskVolumeN"
 
   void add_file(const fs::path& p, std::vector<std::uint8_t> bytes);
   // Simulates a Zone.Identifier stream on a file.
@@ -136,6 +145,12 @@ class FakeEnvironment : public Environment {
                                   int max_count) const override;
   std::optional<std::string> zone_identifier(const fs::path& file) const override;
   int smart_app_control_state() const override { return sac_state; }
+  std::string device_path_of_drive(char letter) const override {
+    for (const auto& [l, device] : device_paths) {
+      if (std::tolower(static_cast<unsigned char>(l)) == std::tolower(static_cast<unsigned char>(letter))) return device;
+    }
+    return {};
+  }
 
  private:
   std::vector<std::pair<std::wstring, std::string>> zones_;

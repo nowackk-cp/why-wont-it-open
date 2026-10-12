@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -181,14 +182,22 @@ int run_check(const std::vector<std::wstring>& args) {
     return 1;
   }
 
-  const auto env = neden::env::make_system_environment();
-  const std::filesystem::path path = std::filesystem::absolute(std::filesystem::path(file));
-  const neden::diagnose::Report report =
-      neden::diagnose::diagnose(path, *env, neden::kb::KnowledgeBase::embedded(), lang);
-  const std::string out = json ? neden::diagnose::to_json(report) : neden::diagnose::to_text(report);
-  std::fwrite(out.data(), 1, out.size(), stdout);
-  if (!report.resolution.target.ok()) return 2;
-  return report.has_errors() ? 3 : 0;
+  try {
+    const auto env = neden::env::make_system_environment();
+    const std::filesystem::path path = std::filesystem::absolute(std::filesystem::path(file));
+    const neden::diagnose::Report report =
+        neden::diagnose::diagnose(path, *env, neden::kb::KnowledgeBase::embedded(), lang);
+    const std::string out = json ? neden::diagnose::to_json(report) : neden::diagnose::to_text(report);
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    if (!report.resolution.target.ok()) return 2;
+    return report.has_errors() ? 3 : 0;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "error: could not analyse the file: %s\n", e.what());
+    return 2;
+  } catch (...) {
+    std::fputs("error: could not analyse the file (unexpected error)\n", stderr);
+    return 2;
+  }
 }
 
 }  // namespace

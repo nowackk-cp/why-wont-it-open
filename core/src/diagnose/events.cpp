@@ -55,38 +55,74 @@ bool ends_with_device_volume(std::string_view before) {
   return n < before.size() && before.substr(0, n).ends_with("harddiskvolume");
 }
 
-// What may precede a drive-less path in a longer string: nothing, a drive colon, or a device volume name.
-bool anchored(std::string_view before) {
-  return before.empty() || before.back() == ':' || ends_with_device_volume(before);
-}
-
 struct Prog {
   std::string full;  // drive-less, lower-case, e.g. "\games\mygame\game.exe"
   std::string dir;   // "\games\mygame"
   std::string name;  // "game.exe"
+  char drive = 0;    // lower-case drive letter of the program, 0 if it has none (UNC path)
+  // Lower-case NT device name of that drive ("\device\harddiskvolume3") if the environment can tell; empty if not.
+  std::string device;
+  // Lower-case names of the program's own modules that live in the program folder (found there, or missing
+  // from it: a quarantined DLL no longer exists but is still the program's own file).
+  std::vector<std::string> own_files;
 };
 
-Prog make_prog(const std::filesystem::path& program) {
+// What may precede a drive-less path in a longer string. The drive must be the program's own: a path on
+// D: never matches a program on C:. A "\Device\HarddiskVolumeN" prefix is compared with the program's
+// volume when the environment can map the drive letter to a device name; when it cannot, such a prefix
+// is accepted (a device path alone cannot be tied to a drive letter) and only the folder/file names decide.
+bool anchored(std::string_view before, const Prog& p) {
+  if (before.empty()) return true;
+  if (before.back() == ':') {
+    if (p.drive == 0 || before.size() < 2 || before[before.size() - 2] != p.drive) return false;
+    return before.size() < 3 || !std::isalnum(static_cast<unsigned char>(before[before.size() - 3]));
+  }
+  if (ends_with_device_volume(before)) return p.device.empty() || before.ends_with(p.device);
+  return false;
+}
+
+Prog make_prog(const std::filesystem::path& program, const env::Environment& env, const resolve::Result& resolution) {
   std::error_code ec;
   std::filesystem::path abs = std::filesystem::absolute(program, ec);
   if (ec) abs = program;
   abs = abs.lexically_normal();
   Prog p;
-  p.full = drive_less(norm(u8(abs)));
+  const std::string full_with_drive = norm(u8(abs));
+  p.full = drive_less(full_with_drive);
   p.name = to_lower_ascii(u8(abs.filename()));
   const std::string dir = drive_less(norm(u8(abs.parent_path())));
   p.dir = dir;
   while (p.dir.size() > 1 && p.dir.back() == '\\') p.dir.pop_back();
   if (p.dir == "\\") p.dir.clear();
+  if (full_with_drive.size() >= 2 && std::isalpha(static_cast<unsigned char>(full_with_drive[0])) &&
+      full_with_drive[1] == ':') {
+    p.drive = full_with_drive[0];
+    p.device = to_lower_ascii(env.device_path_of_drive(p.drive));
+  }
+
+  // The program's own modules in its folder, from the static analysis.
+  std::string folder = norm(u8(abs.parent_path()));
+  while (folder.size() > 3 && folder.back() == '\\') folder.pop_back();
+  for (const resolve::Module& m : resolution.modules) {
+    if (!m.path.empty()) {
+      std::string parent = norm(u8(m.path.lexically_normal().parent_path()));
+      while (parent.size() > 3 && parent.back() == '\\') parent.pop_back();
+      if (parent == folder) p.own_files.push_back(to_lower_ascii(u8(m.path.filename())));
+    } else if (m.location == resolve::Location::NotFound && !m.name.starts_with("api-ms-") &&
+               !m.name.starts_with("ext-ms-")) {
+      p.own_files.push_back(m.name);  // would be loaded from the program folder first
+    }
+  }
   return p;
 }
 
 // Is the directory `dir` (drive-less) ending at index `end` of `t`, properly anchored at its start?
-bool dir_ends_at(const std::string& t, std::size_t end, const std::string& dir) {
+bool dir_ends_at(const std::string& t, std::size_t end, const Prog& p) {
+  const std::string& dir = p.dir;
   if (end < dir.size()) return false;
   const std::size_t start = end - dir.size();
   if (t.compare(start, dir.size(), dir) != 0) return false;
-  return anchored(std::string_view(t).substr(0, start));
+  return anchored(std::string_view(t).substr(0, start), p);
 }
 
 enum class Match { None, Name, Other, Full };
@@ -95,12 +131,12 @@ enum class Match { None, Name, Other, Full };
 //   Full  - it names this exact file (same folder)
 //   Other - it names a file with the same name in a different folder
 //   Name  - it names the file without any folder
-Match match_text(const std::string& text, const Prog& p) {
-  if (p.name.empty()) return Match::None;
+Match match_name(const std::string& text, const std::string& name, const Prog& p) {
+  if (name.empty()) return Match::None;
   const std::string t = norm(text);
   Match best = Match::None;
-  for (std::size_t pos = t.find(p.name); pos != std::string::npos; pos = t.find(p.name, pos + 1)) {
-    const std::size_t after = pos + p.name.size();
+  for (std::size_t pos = t.find(name); pos != std::string::npos; pos = t.find(name, pos + 1)) {
+    const std::size_t after = pos + name.size();
     if (after < t.size()) {
       const char c = t[after];
       if (is_token_char(c)) continue;
@@ -111,13 +147,23 @@ Match match_text(const std::string& text, const Prog& p) {
       if (b != '\\' && (is_token_char(b) || b == '.')) continue;
     }
     if (pos > 0 && t[pos - 1] == '\\') {
-      if (dir_ends_at(t, pos - 1, p.dir)) return Match::Full;
+      if (dir_ends_at(t, pos - 1, p)) return Match::Full;
       best = Match::Other;
     } else if (best == Match::None) {
       best = Match::Name;
     }
   }
   return best;
+}
+
+Match match_text(const std::string& text, const Prog& p) { return match_name(text, p.name, p); }
+
+// Does the text name, with its full path, the program itself or one of its own modules in the program
+// folder? (A file merely sitting in the same folder, e.g. in Downloads, does not count.)
+bool text_names_own_file(const std::string& text, const Prog& p) {
+  if (match_text(text, p) == Match::Full) return true;
+  return std::any_of(p.own_files.begin(), p.own_files.end(),
+                     [&](const std::string& n) { return match_name(text, n, p) == Match::Full; });
 }
 
 // Does any of the fields refer to this program (see match_text for the rules)?
@@ -133,21 +179,6 @@ bool event_mentions_program(const env::EventRecord& e, const Prog& p) {
     }
   }
   return name_only && !other;
-}
-
-// Does the text contain a path inside the program's folder (including the program itself)?
-bool text_in_program_dir(const std::string& text, const Prog& p) {
-  if (p.dir.empty()) return false;
-  const std::string t = norm(text);
-  const std::string needle = p.dir + "\\";
-  for (std::size_t pos = t.find(needle); pos != std::string::npos; pos = t.find(needle, pos + 1)) {
-    if (dir_ends_at(t, pos + p.dir.size(), p.dir)) return true;
-  }
-  return false;
-}
-
-bool event_in_program_dir(const env::EventRecord& e, const Prog& p) {
-  return std::any_of(e.data.begin(), e.data.end(), [&](const std::string& f) { return text_in_program_dir(f, p); });
 }
 
 std::string field_named(const env::EventRecord& e, std::string_view name) {
@@ -223,7 +254,7 @@ std::string when(std::uint64_t ft, std::uint64_t now, Lang lang) {
 class SystemRules {
  public:
   explicit SystemRules(const SystemRulesInput& in, std::vector<Finding>& findings)
-      : in_(in), env_(in.env), lang_(in.lang), findings_(findings), prog_(make_prog(in.program)),
+      : in_(in), env_(in.env), lang_(in.lang), findings_(findings), prog_(make_prog(in.program, in.env, in.resolution)),
         now_(in.env.now()), static_has_error_(std::any_of(findings.begin(), findings.end(), [](const Finding& f) {
           return f.severity == Severity::Error;
         })) {}
@@ -810,11 +841,9 @@ class SystemRules {
       if (path.empty()) {
         for (const std::string& d : e.data) path += d + "\n";
       }
-      const Match m = match_text(path, prog_);
-      if (m != Match::Full && !text_in_program_dir(path, prog_)) {
-        // A bare name without folder is accepted too, but not another folder's file of the same name.
-        if (m != Match::Name) continue;
-      }
+      // Only the program itself or one of its own modules (not just any file in the same folder). A bare
+      // name without folder is accepted too, but not another folder's file of the same name.
+      if (!text_names_own_file(path, prog_) && match_text(path, prog_) != Match::Name) continue;
       std::string action = field_named(e, "Action Name");
       if (action.empty()) action = field_named(e, "Status Description");
       const std::string action_lower = to_lower_ascii(action);
@@ -910,7 +939,7 @@ class SystemRules {
     for (const env::EventRecord& e : env_.events(kCodeIntegrityLog, "", {3077}, kDays, 200)) {
       bool hit = false;
       for (const std::string& field : e.data) {
-        if (match_text(field, prog_) == Match::Full || text_in_program_dir(field, prog_)) hit = true;
+        if (text_names_own_file(field, prog_)) hit = true;
       }
       if (!hit) continue;
       ci_blocked_ = true;

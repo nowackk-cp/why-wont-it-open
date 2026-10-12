@@ -323,6 +323,15 @@ class SystemEnvironment final : public Environment {
     return data <= 2 ? static_cast<int>(data) : -1;
   }
 
+  std::string device_path_of_drive(char letter) const override {
+    if (!std::isalpha(static_cast<unsigned char>(letter))) return {};
+    const wchar_t name[3] = {static_cast<wchar_t>(std::toupper(static_cast<unsigned char>(letter))), L':', L'\0'};
+    wchar_t buf[512];
+    const DWORD n = QueryDosDeviceW(name, buf, 512);
+    if (n == 0) return {};
+    return util::wide_to_utf8(std::wstring(buf));  // first string of the multi-string result
+  }
+
   std::vector<EventRecord> events(const std::string& channel, const std::string& provider,
                                   const std::vector<std::uint32_t>& ids, int max_age_days,
                                   int max_count) const override {

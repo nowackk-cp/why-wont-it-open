@@ -3,6 +3,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <softpub.h>
 #include <wincrypt.h>
 #include <wintrust.h>
@@ -203,7 +204,7 @@ std::string resolve_location(const std::string& base, const ParsedUrl& base_pars
   return "https://" + base_parsed.host + path.substr(0, slash + 1) + loc;
 }
 
-Outcome download_file(const std::string& start_url, const Progress& progress, fs::path* out_file) {
+Outcome download_file(const std::string& start_url, const Progress& progress, fs::path* out_file, FileLock* lock) {
   const std::wstring agent = L"WhyWontItOpen/" + util::utf8_to_wide(std::string(neden::version()));
   Handle session(WinHttpOpen(agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                              WINHTTP_NO_PROXY_BYPASS, 0));
@@ -269,7 +270,9 @@ Outcome download_file(const std::string& start_url, const Progress& progress, fs
     fs::path dir;
     if (!make_unique_dir(&dir)) return failure("could not create a temporary folder");
     const fs::path file = dir / util::utf8_to_wide(name);
-    HANDLE hf = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // FILE_SHARE_READ only: nobody else may write to or delete the file while we fill it.
+    HANDLE hf = CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+                            nullptr);
     if (hf == INVALID_HANDLE_VALUE) {
       remove_with_retry({}, dir);
       return failure("could not create the download file");
@@ -300,8 +303,11 @@ Outcome download_file(const std::string& start_url, const Progress& progress, fs
         break;
       }
     }
-    CloseHandle(hf);
     if (err.empty() && total != 0 && received != total) err = "download incomplete";
+    // A FILE_SHARE_READ lock can't be opened while our write handle exists (sharing violation), so close it
+    // first. A swap in that instant is harmless: the signature is verified only after the lock is held.
+    CloseHandle(hf);
+    if (err.empty() && lock && !FileLock::acquire(file, lock)) err = "could not lock the downloaded file";
     if (!err.empty()) {
       remove_with_retry(file, dir);
       return failure(err);
@@ -320,16 +326,22 @@ Outcome download_file(const std::string& start_url, const Progress& progress, fs
 
 // ---- winget ----------------------------------------------------------------
 
-bool winget_available() {
-  wchar_t found[MAX_PATH];
-  if (SearchPathW(nullptr, L"winget.exe", nullptr, MAX_PATH, found, nullptr) != 0) return true;
-  wchar_t base[MAX_PATH];
-  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
-  if (n == 0 || n >= MAX_PATH) return false;
-  const fs::path p = fs::path(base) / L"Microsoft" / L"WindowsApps" / L"winget.exe";
+// Only the per-user App Installer alias is trusted. SearchPath(nullptr, ...) would also look in the
+// application directory and the current directory, where a planted winget.exe could be picked up.
+std::wstring winget_exe_path() {
+  PWSTR local = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &local)) || !local) {
+    if (local) CoTaskMemFree(local);
+    return {};
+  }
+  const fs::path p = fs::path(local) / L"Microsoft" / L"WindowsApps" / L"winget.exe";
+  CoTaskMemFree(local);
   // App execution aliases are reparse points; attributes are enough.
-  return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES;
+  if (GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES) return {};
+  return p.wstring();
 }
+
+bool winget_available() { return !winget_exe_path().empty(); }
 
 bool is_valid_winget_id(const std::string& id) {
   if (id.empty() || id.size() > 128) return false;
@@ -345,18 +357,7 @@ Outcome install_with_winget(const std::string& winget_id) {
   try {
     if (!is_valid_winget_id(winget_id)) return failure("invalid winget package id");
 
-    std::wstring exe;
-    wchar_t found[MAX_PATH];
-    if (SearchPathW(nullptr, L"winget.exe", nullptr, MAX_PATH, found, nullptr) != 0) {
-      exe = found;
-    } else {
-      wchar_t base[MAX_PATH];
-      const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
-      if (n > 0 && n < MAX_PATH) {
-        const fs::path p = fs::path(base) / L"Microsoft" / L"WindowsApps" / L"winget.exe";
-        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) exe = p.wstring();
-      }
-    }
+    const std::wstring exe = winget_exe_path();
     if (exe.empty()) return failure("winget is not available on this computer");
 
     std::wstring cmd = L"\"" + exe + L"\" install --id " + util::utf8_to_wide(winget_id) +
@@ -449,24 +450,65 @@ SignatureInfo verify_signature(const fs::path& file) {
   return info;
 }
 
+// ---- file lock -------------------------------------------------------------
+
+FileLock::~FileLock() { release(); }
+
+FileLock::FileLock(FileLock&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+
+FileLock& FileLock::operator=(FileLock&& other) noexcept {
+  if (this != &other) {
+    release();
+    handle_ = other.handle_;
+    other.handle_ = nullptr;
+  }
+  return *this;
+}
+
+bool FileLock::acquire(const fs::path& file, FileLock* out) {
+  if (!out) return false;
+  // Read access, shared for reading only: while this handle is open nobody can open the file for writing or
+  // delete / rename it, but WinVerifyTrust, CreateProcess, the installer and msiexec can all still read it.
+  HANDLE h = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  out->release();
+  out->handle_ = h;
+  return true;
+}
+
+void FileLock::release() {
+  if (handle_) {
+    CloseHandle(static_cast<HANDLE>(handle_));
+    handle_ = nullptr;
+  }
+}
+
 // ---- download, verify, run -------------------------------------------------
 
-Outcome download_and_verify(const std::string& url, const std::string& expected_signer, const Progress& progress,
-                            fs::path* out) {
+namespace {
+
+// Downloads and verifies; on success `lock` still holds the verified file open (write/delete denied) so the
+// caller can start it without a window in which the file could be swapped.
+Outcome download_and_verify_locked(const std::string& url, const std::string& expected_signer,
+                                   const Progress& progress, fs::path* out, FileLock* lock) {
   try {
     if (expected_signer.empty()) return failure("no expected signer is known for this download; refusing to run it");
     if (!is_allowed_url(url)) return failure("refusing to download from a host that is not on the allow-list: " + url);
 
     fs::path file;
-    Outcome dl = download_file(url, progress, &file);
+    Outcome dl = download_file(url, progress, &file, lock);
     if (!dl.ok) return dl;
 
+    // The lock is held from before this check until the caller has started the installer.
     const SignatureInfo sig = verify_signature(file);
     if (!sig.valid) {
+      lock->release();
       remove_with_retry(file, file.parent_path());
       return failure("signature invalid (" + fmt_hex("status ", sig.status, ")") + "; the file was deleted", sig.status);
     }
     if (!util::iequals(sig.signer, expected_signer)) {
+      lock->release();
       remove_with_retry(file, file.parent_path());
       return failure("signed by " + sig.signer + ", expected " + expected_signer + "; the file was deleted");
     }
@@ -476,14 +518,25 @@ Outcome download_and_verify(const std::string& url, const std::string& expected_
     ok.message = "downloaded; signature valid, signed by " + sig.signer;
     return ok;
   } catch (...) {
+    if (lock) lock->release();
     return failure("unexpected error while downloading");
   }
 }
 
+}  // namespace
+
+Outcome download_and_verify(const std::string& url, const std::string& expected_signer, const Progress& progress,
+                            fs::path* out) {
+  FileLock lock;
+  Outcome o = download_and_verify_locked(url, expected_signer, progress, out, &lock);
+  return o;  // the lock is released here; callers that run the file use download_verify_run
+}
+
 Outcome download_verify_run(const std::string& url, const std::string& expected_signer, const Progress& progress) {
   fs::path file;
+  FileLock lock;
   try {
-    Outcome v = download_and_verify(url, expected_signer, progress, &file);
+    Outcome v = download_and_verify_locked(url, expected_signer, progress, &file, &lock);
     if (!v.ok) return v;
 
     const bool is_msi = util::to_lower_ascii(file.extension().string()) == ".msi";
@@ -505,8 +558,11 @@ Outcome download_verify_run(const std::string& url, const std::string& expected_
     sei.lpDirectory = wdir.c_str();
 
     Outcome o;
-    if (!ShellExecuteExW(&sei)) {
-      const DWORD err = GetLastError();
+    const BOOL started = ShellExecuteExW(&sei);
+    const DWORD start_error = started ? 0 : GetLastError();
+    lock.release();  // the process exists now (its image is mapped); before this the file could not be replaced
+    if (!started) {
+      const DWORD err = start_error;
       remove_with_retry(file, file.parent_path());
       if (err == ERROR_CANCELLED) return failure("cancelled: the administrator prompt was declined", err);
       return failure("could not start the installer (error " + std::to_string(err) + ")", err);
@@ -536,6 +592,7 @@ Outcome download_verify_run(const std::string& url, const std::string& expected_
     }
     return o;
   } catch (...) {
+    lock.release();
     if (!file.empty()) {
       try {
         remove_with_retry(file, file.parent_path());

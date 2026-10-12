@@ -8,6 +8,9 @@
 #include <unordered_set>
 #include <cstring>
 #include <cwctype>
+#include <exception>
+#include <new>
+#include <unordered_map>
 
 #include "util/text.h"
 
@@ -17,7 +20,7 @@ namespace {
 
 using util::to_lower_ascii;
 
-constexpr std::uint64_t kMaxImageBytes = 512ull * 1024 * 1024;
+constexpr std::size_t kMaxStoredMissingPerModule = 1000;
 constexpr std::uint64_t kHeaderBytes = 4096;
 
 bool is_api_set_name(std::string_view lower) {
@@ -76,6 +79,34 @@ struct Edge {
   int depth = 1;
 };
 
+// One import relationship, kept to recompute delay-only status after the walk.
+struct RawEdge {
+  std::string importer;  // lower-case module name, empty for the program itself
+  std::string dll;       // lower-case
+  bool delay = false;
+};
+
+// False if a manifest attribute value contains a path separator, a drive colon, "..", or a wildcard.
+bool safe_manifest_value(std::string_view v) {
+  if (v.find("..") != std::string_view::npos) return false;
+  for (const char c : v) {
+    if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '\0') return false;
+  }
+  return true;
+}
+
+// Name the loader would look up: lower-case, ".dll" appended when there is no extension.
+std::string loader_name(std::string_view name) {
+  std::string n = to_lower_ascii(name);
+  if (n.empty()) return n;
+  if (n.find('.') == std::string::npos) {
+    n += ".dll";
+  } else if (n.back() == '.') {
+    n.pop_back();  // "foo." means exactly "foo", no extension added
+  }
+  return n;
+}
+
 class Resolver {
  public:
   Resolver(const fs::path& program, const env::Environment& env, const Options& options)
@@ -84,7 +115,7 @@ class Resolver {
   Result run() {
     Result result;
     result.target_path = program_;
-    auto bytes = env_.read_file(program_, kMaxImageBytes);
+    auto bytes = env_.read_file(program_, options_.max_image_bytes);
     if (!bytes) {
       result.target.error = pe::ParseError::IoError;
       result.target.detail = "cannot read file";
@@ -95,12 +126,20 @@ class Resolver {
       result.target.detail = "file is empty";
       return result;
     }
-    auto target = std::make_shared<Image>();
-    target->parse = pe::parse(*bytes);
-    result.target = target->parse;
-    if (!target->parse.ok()) return result;
+    // The parse result lives in `result` (no copy); edges point into it. `result` is not
+    // moved or modified while the walk runs, and vector buffers survive moves anyway.
+    result.target = pe::parse(*bytes);
+    if (!result.target.ok()) return result;
+    if (bytes->size() >= options_.max_image_bytes) {
+      // Only the first max_image_bytes were read; a section "running past the end" is our cap,
+      // not a damaged file.
+      result.target.info->truncated = false;
+      result.target.info->warnings.push_back("file is larger than the analysis limit; only the first " +
+                                             std::to_string(bytes->size()) + " bytes were analysed");
+    }
+    bytes.reset();
 
-    const pe::PeInfo& info = *target->parse.info;
+    const pe::PeInfo& info = *result.target.info;
     process_ = process_machine(info, env_.os());
     result.process_machine = process_;
     wow_ = env_.os().is_64bit && (process_ == pe::Machine::I386 || process_ == pe::Machine::ARMNT);
@@ -119,7 +158,7 @@ class Resolver {
     load_sxs_assemblies(manifest);
 
     for (const pe::ImportedDll& imp : info.imports) {
-      queue_.push_back(Edge{"", false, to_lower_ascii(imp.name), &imp.functions, target, imp.delay_load, 1});
+      queue_.push_back(Edge{"", false, loader_name(imp.name), &imp.functions, nullptr, imp.delay_load, 1});
     }
 
     while (!queue_.empty()) {
@@ -127,6 +166,7 @@ class Resolver {
       queue_.pop_front();
       visit(edge, result);
     }
+    recompute_delay_only(result);
     return result;
   }
 
@@ -188,6 +228,12 @@ class Resolver {
       const std::string token = xml_attr(tag, "publickeytoken");
       std::string arch = xml_attr(tag, "processorarchitecture");
       if (name.empty()) continue;
+      // Manifest values become path components / WinSxS folder-name prefixes: refuse anything
+      // that could escape the intended folder or act as a wildcard.
+      if (!safe_manifest_value(name) || !safe_manifest_value(version) || !safe_manifest_value(token) ||
+          (arch != "*" && !safe_manifest_value(arch))) {
+        continue;
+      }
       if (token.empty()) {
         // Private assembly: a folder next to the program (Chrome's "<version>\",
         // Blender's "blender.shared\").
@@ -223,7 +269,7 @@ class Resolver {
         key.push_back(cur);
         cur = 0;
       } else if (dir[i] >= '0' && dir[i] <= '9') {
-        cur = cur * 10 + (dir[i] - '0');
+        if (cur < 100000000) cur = cur * 10 + (dir[i] - '0');  // saturate: no signed overflow
       }
     }
     key.push_back(cur);
@@ -244,7 +290,6 @@ class Resolver {
     auto it = index_.find(edge.dll);
     if (it != index_.end()) {
       module = &result.modules[it->second];
-      if (!edge.delay) module->delay_only = false;
     } else {
       if (static_cast<int>(result.modules.size()) >= options_.max_modules) {
         result.truncated_walk = true;
@@ -259,6 +304,7 @@ class Resolver {
       module = &result.modules[index_[edge.dll]];  // enqueue doesn't touch modules, but stay safe
     }
 
+    raw_edges_.push_back({edge.importer, edge.dll, edge.delay});
     const std::string importer = edge.importer.empty() ? to_lower_ascii(program_.filename().string()) : edge.importer;
     if (std::find(module->importers.begin(), module->importers.end(), importer) == module->importers.end()) {
       module->importers.push_back(importer);
@@ -375,10 +421,10 @@ class Resolver {
     auto image = load_shared(m.path);
     if (!image->parse.ok()) return;
     for (const pe::ImportedDll& imp : image->parse.info->imports) {
-      const std::string dll = to_lower_ascii(imp.name);
+      const std::string dll = loader_name(imp.name);
       if (m.system_owned && imp.delay_load) continue;
-      queue_.push_back(Edge{m.name, m.system_owned, dll, &imp.functions, image, imp.delay_load || m.delay_only,
-                            depth + 1});
+      // Delay-only status is recomputed from all edges after the walk (recompute_delay_only).
+      queue_.push_back(Edge{m.name, m.system_owned, dll, &imp.functions, image, imp.delay_load, depth + 1});
     }
   }
 
@@ -393,12 +439,36 @@ class Resolver {
     for (const pe::ImportedFunction& f : *edge.functions) {
       const bool found = f.by_ordinal ? exports->ordinals.count(f.ordinal) > 0 : exports->names.count(f.name) > 0;
       if (found) continue;
-      MissingFunction mf{importer, f.by_ordinal ? "#" + std::to_string(f.ordinal) : f.name};
-      const bool dup = std::any_of(module.missing_functions.begin(), module.missing_functions.end(), [&](const auto& x) {
-        return x.importer == mf.importer && x.function == mf.function;
-      });
-      if (!dup) module.missing_functions.push_back(std::move(mf));
+      MissingFunction mf{importer, f.by_ordinal ? "#" + std::to_string(f.ordinal) : f.name, f.by_ordinal, f.ordinal};
+      auto& seen = missing_seen_[module.name];
+      if (!seen.insert(mf.importer + '\n' + mf.function).second) continue;  // already recorded
+      if (module.missing_functions.size() >= kMaxStoredMissingPerModule) {
+        ++module.missing_functions_omitted;
+        continue;
+      }
+      module.missing_functions.push_back(std::move(mf));
     }
+  }
+
+  // A module is delay-only iff every path from the program to it contains a delay edge,
+  // i.e. it is not reachable from the program through normal (non-delay) edges only.
+  void recompute_delay_only(Result& result) {
+    std::unordered_map<std::string, std::vector<const RawEdge*>> by_importer;
+    for (const RawEdge& e : raw_edges_) {
+      if (!e.delay) by_importer[e.importer].push_back(&e);
+    }
+    std::unordered_set<std::string> reached;
+    std::deque<std::string> work{std::string()};  // the program itself has the empty name
+    while (!work.empty()) {
+      const std::string cur = std::move(work.front());
+      work.pop_front();
+      const auto it = by_importer.find(cur);
+      if (it == by_importer.end()) continue;
+      for (const RawEdge* e : it->second) {
+        if (reached.insert(e->dll).second) work.push_back(e->dll);
+      }
+    }
+    for (Module& m : result.modules) m.delay_only = reached.count(m.name) == 0;
   }
 
   const Exports* exports_of(const fs::path& path) {
@@ -430,7 +500,7 @@ class Resolver {
     auto it = images_.find(key);
     if (it != images_.end()) return it->second;
     auto image = std::make_shared<Image>();
-    if (auto bytes = env_.read_file(path, kMaxImageBytes)) {
+    if (auto bytes = env_.read_file(path, options_.max_image_bytes)) {
       image->parse = pe::parse(*bytes);
     } else {
       image->parse.error = pe::ParseError::IoError;
@@ -450,6 +520,8 @@ class Resolver {
   std::vector<fs::path> sxs_dirs_;
   std::unordered_set<std::string> known_;
   std::deque<Edge> queue_;
+  std::vector<RawEdge> raw_edges_;
+  std::unordered_map<std::string, std::unordered_set<std::string>> missing_seen_;  // module -> importer+function keys
   std::map<std::string, std::size_t> index_;
   std::map<std::wstring, std::shared_ptr<Image>> images_;
 };
@@ -483,7 +555,22 @@ const Module* Result::find(std::string_view lower_name) const {
 }
 
 Result resolve(const fs::path& program, const env::Environment& env, const Options& options) {
-  return Resolver(program, env, options).run();
+  try {
+    return Resolver(program, env, options).run();
+  } catch (const std::exception& e) {
+    // std::bad_alloc on a hostile file, or any other failure: a clean "could not analyse" result.
+    Result r;
+    r.target_path = program;
+    r.target.error = pe::ParseError::IoError;
+    r.target.detail = std::string("could not analyse the file: ") + e.what();
+    return r;
+  } catch (...) {
+    Result r;
+    r.target_path = program;
+    r.target.error = pe::ParseError::IoError;
+    r.target.detail = "could not analyse the file: unexpected error";
+    return r;
+  }
 }
 
 }  // namespace neden::resolve

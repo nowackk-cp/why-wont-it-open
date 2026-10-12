@@ -87,6 +87,30 @@ bool ends_with_nocase(const std::wstring& s, const wchar_t* suffix) {
   return s.size() >= n && _wcsicmp(s.c_str() + s.size() - n, suffix) == 0;
 }
 
+// True for UNC paths (\\server\share, \\?\UNC\...) and for drives that are mapped network shares.
+// The tool only analyses local files: reading from a share would be slow, can hang, and the file could
+// change underneath the analysis.
+bool is_network_path(const std::wstring& path) {
+  std::wstring full = path;
+  wchar_t buf[MAX_PATH * 4];
+  const DWORD n = GetFullPathNameW(path.c_str(), static_cast<DWORD>(_countof(buf)), buf, nullptr);
+  if (n > 0 && n < _countof(buf)) full.assign(buf, n);
+  if (full.size() >= 2 && (full[0] == L'\\' || full[0] == L'/') && (full[1] == L'\\' || full[1] == L'/')) {
+    // "\\?\C:\x" and "\\.\C:\x" are local device-style paths; "\\?\UNC\..." and "\\server\..." are not.
+    const bool device_prefix = full.size() >= 4 && (full[2] == L'?' || full[2] == L'.') &&
+                               (full[3] == L'\\' || full[3] == L'/');
+    if (!device_prefix) return true;
+    const std::wstring rest = full.substr(4);
+    if (rest.size() >= 4 && _wcsnicmp(rest.c_str(), L"UNC", 3) == 0 && (rest[3] == L'\\' || rest[3] == L'/')) return true;
+    full = rest;
+  }
+  if (full.size() >= 2 && full[1] == L':' && iswalpha(full[0])) {
+    const wchar_t root[4] = {full[0], L':', L'\\', L'\0'};
+    return GetDriveTypeW(root) == DRIVE_REMOTE;
+  }
+  return false;
+}
+
 // Resolves a .lnk shortcut to its target. Returns the input when it can't.
 std::wstring resolve_shortcut(const std::wstring& lnk) {
   std::wstring result = lnk;
@@ -419,8 +443,22 @@ void MainWindow::choose_file() {
 
 void MainWindow::open_file(std::wstring path) {
   if (mode_ == Mode::Busy || fix_busy_) return;
-  if (ends_with_nocase(path, L".lnk")) path = resolve_shortcut(path);
+  if (is_network_path(path)) {
+    refuse_network_path(path);
+    return;
+  }
+  if (ends_with_nocase(path, L".lnk")) {
+    path = resolve_shortcut(path);
+    if (is_network_path(path)) {  // the shortcut points to a share
+      refuse_network_path(path);
+      return;
+    }
+  }
   start_diagnosis(path);
+}
+
+void MainWindow::refuse_network_path(const std::wstring& path) {
+  MessageBoxW(hwnd_, subst(S::NetworkPathRefused, {path}).c_str(), tr(S::WindowTitle), MB_OK | MB_ICONINFORMATION);
 }
 
 void MainWindow::start_diagnosis(const std::wstring& path) {
@@ -525,8 +563,10 @@ void MainWindow::on_action(size_t card, Action action) {
 
 // Opens a pre-filled GitHub issue that contains nothing but the DLL names.
 void MainWindow::report_unknown(const neden::diagnose::Finding& f) {
+  constexpr size_t kMaxReported = 10;
   std::vector<std::string> names;
   for (const std::string& e : f.evidence) {
+    if (names.size() >= kMaxReported) break;
     const std::string name = e.substr(0, e.find(' '));
     const bool plausible = name.size() > 4 && name.size() < 100 &&
                            _stricmp(name.c_str() + name.size() - 4, ".dll") == 0 &&
@@ -537,9 +577,11 @@ void MainWindow::report_unknown(const neden::diagnose::Finding& f) {
 
   std::string list;
   for (const std::string& n : names) list += (list.empty() ? "" : "\n") + n;
-  wchar_t msg[2048];
-  swprintf_s(msg, tr(S::ConfirmReport), widen(list).c_str());
-  if (MessageBoxW(hwnd_, msg, tr(S::ReportUnknown), MB_OKCANCEL | MB_ICONINFORMATION) != IDOK) return;
+  // Built as a std::wstring (no fixed buffer): replace the "%s" of the translated text by hand.
+  std::wstring msg = tr(S::ConfirmReport);
+  const size_t at = msg.find(L"%s");
+  if (at != std::wstring::npos) msg.replace(at, 2, widen(list));
+  if (MessageBoxW(hwnd_, msg.c_str(), tr(S::ReportUnknown), MB_OKCANCEL | MB_ICONINFORMATION) != IDOK) return;
 
   auto encode = [](const std::string& s) {
     std::string out;

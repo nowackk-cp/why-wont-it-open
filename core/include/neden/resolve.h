@@ -2,6 +2,8 @@
 // loading anything, and walks the dependency tree.
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string_view>
@@ -38,7 +40,9 @@ struct Candidate {
 // An imported function that the resolved DLL does not export.
 struct MissingFunction {
   std::string importer;  // lower-case module name that imports it
-  std::string function;  // name, or "#<ordinal>"
+  std::string function;  // display string: name, or "#<ordinal>"
+  bool by_ordinal = false;
+  std::uint16_t ordinal = 0;  // valid when by_ordinal
 };
 
 struct Module {
@@ -54,12 +58,16 @@ struct Module {
   bool system_owned = false;     // lives in system dir/KnownDLLs/API set: part of Windows or a runtime
   int depth = 1;                 // 1 = imported directly by the program
   std::vector<std::string> importers;           // lower-case names, first is the shortest path
-  std::vector<MissingFunction> missing_functions;
+  std::vector<MissingFunction> missing_functions;  // capped; see missing_functions_omitted
+  std::size_t missing_functions_omitted = 0;       // further missing functions counted but not stored
   std::vector<Candidate> candidates;            // every same-named file in search order (not for KnownDll/ApiSet)
 };
 
 struct Options {
   int max_modules = 400;
+  // Files are read up to this many bytes. A larger file is analysed from its
+  // first max_image_bytes bytes and is NOT reported as truncated/incomplete.
+  std::uint64_t max_image_bytes = 512ull * 1024 * 1024;
   // True for DLL names that belong to a redistributable package rather than
   // to Windows itself. Such DLLs are walked even when they live in the system
   // dir (e.g. vcruntime140.dll -> api-ms-win-crt-*); Windows' own DLLs are not.

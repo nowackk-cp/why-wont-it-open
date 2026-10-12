@@ -46,6 +46,7 @@ enum class S {
   ClipboardFailed,
   ReportUnknown,
   ConfirmReport,   // %s list of DLL names
+  NetworkPathRefused,  // %1 path
   Count_
 };
 

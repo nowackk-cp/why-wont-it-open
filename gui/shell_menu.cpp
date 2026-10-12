@@ -13,7 +13,7 @@ namespace {
 constexpr const wchar_t* kTypes[] = {L".exe", L".dll"};
 
 std::wstring key_for(const wchar_t* ext) {
-  return std::wstring(L"Software\Classes\SystemFileAssociations\\") + ext + L"\shell\WhyWontItOpen";
+  return std::wstring(L"Software\\Classes\\SystemFileAssociations\\") + ext + L"\\shell\\WhyWontItOpen";
 }
 
 bool set_string(HKEY key, const wchar_t* name, const std::wstring& value) {
@@ -40,7 +40,7 @@ bool register_shell_menu() {
     ok &= set_string(verb, L"MUIVerb", label);
     ok &= set_string(verb, L"Icon", std::wstring(L"\"") + exe + L"\",0");
     RegCloseKey(verb);
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, (base + L"\command").c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &command,
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, (base + L"\\command").c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &command,
                         nullptr) != ERROR_SUCCESS) {
       ok = false;
       continue;

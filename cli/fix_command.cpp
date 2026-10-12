@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <exception>
 #include <iostream>
 #include <string>
 
@@ -32,7 +33,7 @@ bool confirm() {
 
 }  // namespace
 
-int run_fix_command(const std::vector<std::wstring>& args) {
+static int run_fix_command_impl(const std::vector<std::wstring>& args) {
   namespace diag = neden::diagnose;
   namespace fix = neden::fix;
 
@@ -116,4 +117,16 @@ int run_fix_command(const std::vector<std::wstring>& args) {
 
   if (fixable == 0) std::puts("Nothing to fix automatically.");
   return failed ? 1 : 0;
+}
+
+int run_fix_command(const std::vector<std::wstring>& args) {
+  try {
+    return run_fix_command_impl(args);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "error: %s\n", e.what());
+    return 2;
+  } catch (...) {
+    std::fputs("error: unexpected error\n", stderr);
+    return 2;
+  }
 }

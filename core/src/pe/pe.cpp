@@ -23,6 +23,8 @@ constexpr std::uint32_t kMaxSections = 96;
 constexpr std::uint32_t kMaxImportedDlls = 4096;
 constexpr std::uint32_t kMaxFunctionsPerDll = 65536;
 constexpr std::uint32_t kMaxExports = 65536;
+constexpr std::uint64_t kMaxTotalImportedFunctions = 200000;  // across all DLLs, incl. delay-load
+constexpr std::uint64_t kMaxExportNameBytes = 16ull * 1024 * 1024;
 constexpr std::size_t kMaxStringLength = 4096;
 constexpr std::uint32_t kMaxResourceEntries = 4096;
 constexpr std::size_t kMaxManifestBytes = 1024 * 1024;
@@ -109,6 +111,8 @@ class Parser {
   std::span<const std::uint8_t> d_;
   PeInfo& info_;
   std::array<DataDir, 16> dirs_{};
+  std::uint64_t total_functions_ = 0;
+  bool functions_capped_ = false;
 
   std::uint64_t fsize() const { return d_.size(); }
 
@@ -194,6 +198,15 @@ class Parser {
              " functions; list truncated");
         return;
       }
+      if (total_functions_ >= kMaxTotalImportedFunctions) {
+        if (!functions_capped_) {
+          functions_capped_ = true;
+          warn("more than " + std::to_string(kMaxTotalImportedFunctions) +
+               " imported functions in total; further imports are ignored");
+        }
+        return;
+      }
+      ++total_functions_;
       const std::uint64_t at = table_rva + i * esize;
       std::uint64_t v = 0;
       if (info_.pe32_plus) {
@@ -361,6 +374,7 @@ class Parser {
     }
 
     std::vector<std::vector<std::string>> by_index(nfuncs);
+    std::uint64_t name_bytes = 0;
     for (std::uint32_t i = 0; i < nnames; ++i) {
       const std::uint16_t idx = le16(ords + std::size_t{i} * 2);
       if (idx >= nfuncs) {
@@ -371,6 +385,11 @@ class Parser {
       if (!cstr_at(le32(names + std::size_t{i} * 4), nm, "export name")) {
         warn("export name RVA is outside the file");
         continue;
+      }
+      name_bytes += nm.size();
+      if (name_bytes > kMaxExportNameBytes) {
+        warn("export names exceed " + std::to_string(kMaxExportNameBytes) + " bytes in total; further names ignored");
+        break;
       }
       by_index[idx].push_back(std::move(nm));
     }

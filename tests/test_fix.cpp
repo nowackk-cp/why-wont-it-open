@@ -147,3 +147,22 @@ TEST(fix_download_rejects_before_network) {
   CHECK(!fix::download_and_verify("https://microsoft.com.evil.com/x.exe", "Microsoft Corporation", {}, &out).ok);
   CHECK(out.empty());
 }
+
+// Real network round trip; opt-in with NEDEN_NETWORK_TESTS=1. Downloads and
+// verifies the official VC++ x86 redistributable but never runs it.
+TEST(fix_network_download_and_verify) {
+  char flag[8] = {};
+  if (GetEnvironmentVariableA("NEDEN_NETWORK_TESTS", flag, sizeof(flag)) == 0 || flag[0] != '1') return;
+  std::filesystem::path file;
+  const auto ok = neden::fix::download_and_verify("https://aka.ms/vc14/vc_redist.x86.exe", "Microsoft Corporation", {},
+                                                  &file);
+  CHECK(ok.ok);
+  if (!ok.ok) std::fprintf(stderr, "  %s\n", ok.message.c_str());
+  CHECK(std::filesystem::exists(file));
+  std::error_code ec;
+  std::filesystem::remove_all(file.parent_path(), ec);
+
+  const auto wrong = neden::fix::download_and_verify("https://aka.ms/vc14/vc_redist.x86.exe", "Contoso Ltd", {}, &file);
+  CHECK(!wrong.ok);
+  CHECK(wrong.message.find("Contoso") != std::string::npos);
+}
