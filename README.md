@@ -7,7 +7,7 @@
 A Windows program doctor. Drag an `.exe` that refuses to start onto the window, and it tells you
 **which component is missing or wrong** and points you to the **official** fix.
 
-<!-- screenshot -->
+![Why Won't It Open? showing that an old game needs the Visual C++ 2010 x86 runtime](docs/screenshot.png)
 
 > "The code execution cannot proceed because MSVCP140.dll was not found."
 > "The application was unable to start correctly (0xc000007b)."

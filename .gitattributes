@@ -4,3 +4,5 @@
 *.sln text eol=crlf
 *.exe binary
 *.dll binary
+*.png binary
+*.ico binary

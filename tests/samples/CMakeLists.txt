@@ -1,6 +1,5 @@
 # Real binaries produced by the MSVC toolchain, analysed (never run) by the
 # integration tests in tests/test_integration.cpp.
-enable_language(C)
 
 add_library(fakedep_full SHARED fakedep.c fakedep_full.def)
 add_library(fakedep_old SHARED fakedep.c fakedep_old.def)

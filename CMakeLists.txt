@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(why_wont_it_open VERSION 0.1.0 LANGUAGES CXX)
+project(why_wont_it_open VERSION 0.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "This project targets Windows only.")
@@ -22,9 +22,15 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
 endif()
 
 option(NEDEN_FUZZ "Build libFuzzer targets" OFF)
+option(NEDEN_TOOLS "Build developer tools (test-data generators)" OFF)
 
 add_subdirectory(core)
 add_subdirectory(cli)
+add_subdirectory(gui)
+
+if(NEDEN_TOOLS)
+  add_subdirectory(tools)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
