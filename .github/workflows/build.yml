@@ -59,12 +59,9 @@ jobs:
       - name: Fuzz the PE parser for 2 minutes
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $asan = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx86\x86\clang_rt.asan_dynamic-i386.dll" | Select-Object -First 1
-          $env:PATH = "$($asan.DirectoryName);$env:PATH"
           New-Item -ItemType Directory -Force build/fuzz-work | Out-Null
           ./build/fuzz/Release/fuzz_pe.exe -max_total_time=120 -max_len=8192 build/fuzz-work fuzz/corpus
-          if ($LASTEXITCODE -ne 0) { throw "fuzzer found a crash" }
+          if ($LASTEXITCODE -ne 0) { throw "fuzz_pe exited with $LASTEXITCODE (crash, or the ASan runtime is missing)" }
 
       - name: Upload crash inputs
         if: failure()
