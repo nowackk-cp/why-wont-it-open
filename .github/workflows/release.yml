@@ -43,9 +43,11 @@ jobs:
           Compress-Archive -Path build/gui/Release/WhyWontItOpen.exe, build/cli/Release/neden.exe, LICENSE, README.md `
             -DestinationPath "dist/why-wont-it-open-$v-x86.zip"
           Push-Location dist
-          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+          $sums = Get-ChildItem -File | Sort-Object Name | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
-          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          }
+          # LF line endings so `sha256sum -c` works on Linux and macOS too.
+          [IO.File]::WriteAllText("$PWD/SHA256SUMS.txt", ($sums -join "`n") + "`n")
           Get-Content SHA256SUMS.txt
           Pop-Location
 
