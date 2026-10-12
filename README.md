@@ -38,7 +38,7 @@ which component is missing or wrong, and points you to the **official** fix.
 
 ## Building
 
-Requires Visual Studio 2022 (Desktop development with C++) and CMake ≥ 3.21.
+Requires Visual Studio 2022 or newer (Desktop development with C++) and CMake ≥ 3.21.
 
 ```bash
 cmake --preset x86

@@ -3,8 +3,7 @@
   "configurePresets": [
     {
       "name": "x86",
-      "displayName": "x86 (Visual Studio 2022)",
-      "generator": "Visual Studio 17 2022",
+      "displayName": "x86 (Visual Studio)",
       "architecture": "Win32",
       "binaryDir": "${sourceDir}/build/x86"
     }

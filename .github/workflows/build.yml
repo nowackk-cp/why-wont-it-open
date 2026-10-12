@@ -15,10 +15,10 @@ jobs:
       matrix:
         config: [Release, Debug]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure (x86)
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A Win32
+        run: cmake -S . -B build -A Win32
 
       - name: Build
         run: cmake --build build --config ${{ matrix.config }} --parallel
@@ -28,7 +28,7 @@ jobs:
 
       - name: Upload binary
         if: matrix.config == 'Release'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: neden-x86
           path: build/cli/Release/neden.exe
