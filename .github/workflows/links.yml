@@ -1,0 +1,23 @@
+name: links
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'   # weekly, Mondays 04:17 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - 'data/runtimes.json'
+      - 'tools/check_links.ps1'
+      - '.github/workflows/links.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check-links:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check download and info links
+        shell: pwsh
+        run: ./tools/check_links.ps1
