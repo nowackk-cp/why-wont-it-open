@@ -1,0 +1,19 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "x86",
+      "displayName": "x86 (Visual Studio 2022)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/x86"
+    }
+  ],
+  "buildPresets": [
+    { "name": "x86-release", "configurePreset": "x86", "configuration": "Release" },
+    { "name": "x86-debug", "configurePreset": "x86", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    { "name": "x86-release", "configurePreset": "x86", "configuration": "Release", "output": { "outputOnFailure": true } }
+  ]
+}
