@@ -1,0 +1,16 @@
+name: Unknown DLL
+description: The tool didn't know which package provides a DLL.
+labels: [unknown-dll]
+body:
+  - type: input
+    id: dll
+    attributes:
+      label: DLL name(s)
+      placeholder: e.g. foo140.dll
+    validations:
+      required: true
+  - type: textarea
+    id: package
+    attributes:
+      label: Which package or program provides it?
+      description: An official download page is very helpful. Please never link to "DLL download" websites.

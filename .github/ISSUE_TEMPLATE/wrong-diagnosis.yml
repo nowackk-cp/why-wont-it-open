@@ -1,0 +1,27 @@
+name: Wrong or missing diagnosis
+description: The tool said something wrong, or missed the real cause.
+labels: [wrong-diagnosis]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! A wrong diagnosis is the worst bug this tool can have.
+        Please paste the report from the **Copy report** button (it already hides your user name).
+  - type: textarea
+    id: report
+    attributes:
+      label: Report
+      description: Paste the copied report here.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What was the real cause?
+      description: If you found it, how did you fix the program in the end?
+  - type: input
+    id: program
+    attributes:
+      label: Program name and where it came from
+      placeholder: e.g. SomeGame 1.2 from Steam
