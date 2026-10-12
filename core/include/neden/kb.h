@@ -20,7 +20,7 @@ struct Package {
   ArchMap url;                  // official direct download links (https only)
   std::string info_url;         // official page describing the package
   std::string signer;           // expected Authenticode signer, e.g. "Microsoft Corporation"
-  std::string kind;             // "redist" (default), "windows-feature", "driver", "program-file"
+  std::string kind;             // "redist" (default), "windows-feature", "os-update", "driver", "program-file"
 
   // Looks up arch, then "any". Empty string if absent.
   std::string winget_for(std::string_view arch) const;

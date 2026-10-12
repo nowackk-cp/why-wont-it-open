@@ -255,7 +255,7 @@ TEST(kb_embedded_is_consistent) {
     }
     if (!p.info_url.empty()) CHECK(p.info_url.rfind("https://", 0) == 0);
     if (p.kind == "redist" || p.kind == "windows-feature") CHECK(p.signer == "Microsoft Corporation" || p.id == "physx");
-    CHECK(p.kind == "redist" || p.kind == "windows-feature" || p.kind == "driver" || p.kind == "program-file");
+    CHECK(p.kind == "redist" || p.kind == "windows-feature" || p.kind == "os-update" || p.kind == "driver" || p.kind == "program-file");
     // A redistributable must be obtainable somehow.
     if (p.kind == "redist") CHECK(!p.winget.empty() || !p.url.empty() || !p.info_url.empty());
   }
