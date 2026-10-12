@@ -22,6 +22,16 @@ struct OsInfo {
   std::uint32_t build = 19045;
 };
 
+// One record of a Windows event log.
+struct EventRecord {
+  std::string channel;                // e.g. "Application"
+  std::string provider;               // e.g. "Application Error"
+  std::uint32_t id = 0;
+  std::uint64_t time = 0;             // FILETIME (100 ns since 1601) as UTC
+  std::vector<std::string> data;      // <EventData> values in order (UTF-8)
+  std::vector<std::string> names;     // <Data Name="..."> per value; "" for unnamed (may be shorter than data)
+};
+
 class Environment {
  public:
   virtual ~Environment() = default;
@@ -61,6 +71,25 @@ class Environment {
     std::string arch;
   };
   virtual std::vector<DotnetFramework> dotnet_frameworks() const = 0;
+
+  // Current time as FILETIME (UTC).
+  virtual std::uint64_t now() const = 0;
+
+  // Events of one log channel, most recent first: at most max_count records,
+  // not older than max_age_days, with one of the given ids (empty = any id)
+  // and, when provider is not empty, written by that provider. Unreadable or
+  // missing channels yield an empty list. Read-only.
+  virtual std::vector<EventRecord> events(const std::string& channel, const std::string& provider,
+                                          const std::vector<std::uint32_t>& ids, int max_age_days,
+                                          int max_count) const = 0;
+
+  // Contents of the file's ":Zone.Identifier" alternate data stream (Mark of
+  // the Web): an INI text with a "ZoneId=3" line. std::nullopt if there is none.
+  virtual std::optional<std::string> zone_identifier(const fs::path& file) const = 0;
+
+  // Smart App Control: 0 off, 1 on (enforcing), 2 evaluation mode, -1 unknown
+  // (also: Windows older than 11 22H2, where the setting does not exist).
+  virtual int smart_app_control_state() const = 0;
 };
 
 // The machine we are running on. Handles WOW64 (Sysnative, KEY_WOW64_64KEY).
@@ -79,8 +108,13 @@ class FakeEnvironment : public Environment {
   bool netfx35 = false;
   bool netfx4 = true;
   std::vector<DotnetFramework> dotnet;
+  std::vector<EventRecord> event_log;                 // events()/now() are simulated from this
+  std::uint64_t now_filetime = 134000000000000000ull;  // ~ mid 2025; tests set an explicit date
+  int sac_state = -1;
 
   void add_file(const fs::path& p, std::vector<std::uint8_t> bytes);
+  // Simulates a Zone.Identifier stream on a file.
+  void set_zone_identifier(const fs::path& file, std::string contents);
 
   OsInfo os() const override { return os_info; }
   fs::path windows_dir() const override { return windows; }
@@ -96,8 +130,15 @@ class FakeEnvironment : public Environment {
   bool netfx35_installed() const override { return netfx35; }
   bool netfx4_installed() const override { return netfx4; }
   std::vector<DotnetFramework> dotnet_frameworks() const override { return dotnet; }
+  std::uint64_t now() const override { return now_filetime; }
+  std::vector<EventRecord> events(const std::string& channel, const std::string& provider,
+                                  const std::vector<std::uint32_t>& ids, int max_age_days,
+                                  int max_count) const override;
+  std::optional<std::string> zone_identifier(const fs::path& file) const override;
+  int smart_app_control_state() const override { return sac_state; }
 
  private:
+  std::vector<std::pair<std::wstring, std::string>> zones_;
   static std::wstring key(const fs::path& p);
   std::vector<std::pair<std::wstring, std::vector<std::uint8_t>>> files_;
 };

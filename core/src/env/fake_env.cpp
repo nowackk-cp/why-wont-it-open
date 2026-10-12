@@ -74,4 +74,42 @@ std::optional<std::string> FakeEnvironment::resolve_api_set(const std::string& n
   return std::nullopt;
 }
 
+void FakeEnvironment::set_zone_identifier(const fs::path& file, std::string contents) {
+  const std::wstring k = key(file);
+  for (auto& [name, text] : zones_) {
+    if (name == k) {
+      text = std::move(contents);
+      return;
+    }
+  }
+  zones_.emplace_back(k, std::move(contents));
+}
+
+std::optional<std::string> FakeEnvironment::zone_identifier(const fs::path& file) const {
+  const std::wstring k = key(file);
+  for (const auto& [name, text] : zones_) {
+    if (name == k) return text;
+  }
+  return std::nullopt;
+}
+
+std::vector<EventRecord> FakeEnvironment::events(const std::string& channel, const std::string& provider,
+                                                 const std::vector<std::uint32_t>& ids, int max_age_days,
+                                                 int max_count) const {
+  constexpr std::uint64_t kDay = 24ull * 3600ull * 10000000ull;
+  const std::uint64_t age = static_cast<std::uint64_t>(std::max(max_age_days, 0)) * kDay;
+  const std::uint64_t oldest = now_filetime > age ? now_filetime - age : 0;
+  std::vector<EventRecord> out;
+  for (const EventRecord& e : event_log) {
+    if (!util::iequals(e.channel, channel)) continue;
+    if (!provider.empty() && !util::iequals(e.provider, provider)) continue;
+    if (!ids.empty() && std::find(ids.begin(), ids.end(), e.id) == ids.end()) continue;
+    if (e.time < oldest || e.time > now_filetime + kDay) continue;
+    out.push_back(e);
+  }
+  std::stable_sort(out.begin(), out.end(), [](const EventRecord& a, const EventRecord& b) { return a.time > b.time; });
+  if (max_count >= 0 && out.size() > static_cast<std::size_t>(max_count)) out.resize(static_cast<std::size_t>(max_count));
+  return out;
+}
+
 }  // namespace neden::env

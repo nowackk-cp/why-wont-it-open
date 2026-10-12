@@ -38,6 +38,7 @@ struct PeBuilder {
   std::optional<std::string> clr_metadata_version;
   std::uint32_t clr_flags = 1;
   std::string manifest;  // RT_MANIFEST id 1 when non-empty
+  std::uint32_t certificate_size = 0;  // non-zero: data directory 4 (security) claims a signature of this size
 
   bool is_pe32_plus() const {
     return machine != neden::pe::Machine::I386 && machine != neden::pe::Machine::ARMNT;
@@ -350,6 +351,7 @@ inline std::vector<std::uint8_t> PeBuilder::build() const {
   set_dir(0, d_export);
   set_dir(1, d_import);
   if (!rsrc.empty()) set_dir(2, {rsrc_rva, static_cast<std::uint32_t>(rsrc.size())});
+  if (certificate_size != 0) set_dir(4, {0x1000, certificate_size});
   set_dir(13, d_delay);
   set_dir(14, d_clr);
 

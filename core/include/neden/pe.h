@@ -106,6 +106,8 @@ struct PeInfo {
   std::uint64_t file_size = 0;
   bool truncated = false;          // raw data of some section extends past end of file
   std::uint64_t overlay_size = 0;  // bytes after the last section's raw data
+  std::uint32_t security_dir_size = 0;  // size of the certificate table (data directory 4); 0 = not signed
+  bool has_signature() const { return security_dir_size != 0; }  // present, NOT verified
 
   // Non-fatal problems found while parsing (bad RVAs, cut-off tables, ...).
   std::vector<std::string> warnings;

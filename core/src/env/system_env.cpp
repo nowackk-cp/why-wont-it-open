@@ -5,6 +5,7 @@
 // physical(), which maps the native System32 to "Sysnative", and registry
 // reads use KEY_WOW64_64KEY.
 #include <windows.h>
+#include <winevt.h>
 #include <winternl.h>
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <cwctype>
 
+#include "env/event_xml.h"
 #include "neden/env.h"
 #include "util/text.h"
 
@@ -292,7 +294,95 @@ class SystemEnvironment final : public Environment {
     return result;
   }
 
+  std::uint64_t now() const override {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+  }
+
+  std::optional<std::string> zone_identifier(const fs::path& file) const override {
+    const std::wstring stream = physical(file).wstring() + L":Zone.Identifier";
+    HANDLE h = CreateFileW(stream.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return std::nullopt;
+    char buf[8192];
+    DWORD got = 0;
+    const BOOL ok = ReadFile(h, buf, sizeof(buf), &got, nullptr);
+    CloseHandle(h);
+    if (!ok) return std::nullopt;
+    return std::string(buf, got);
+  }
+
+  int smart_app_control_state() const override {
+    DWORD data = 0, size = sizeof(data);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\CI\\Policy",
+                     L"VerifiedAndReputablePolicyState", RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &data,
+                     &size) != ERROR_SUCCESS) {
+      return -1;
+    }
+    return data <= 2 ? static_cast<int>(data) : -1;
+  }
+
+  std::vector<EventRecord> events(const std::string& channel, const std::string& provider,
+                                  const std::vector<std::uint32_t>& ids, int max_age_days,
+                                  int max_count) const override {
+    std::vector<EventRecord> out;
+    if (channel.empty() || max_count <= 0 || max_age_days < 0) return out;
+    // Names go inside an XPath string literal; refuse anything that could break out of it.
+    if (provider.find_first_of("'\"<>&") != std::string::npos) return out;
+
+    std::string cond;
+    auto add = [&](const std::string& c) { cond += (cond.empty() ? "" : " and ") + c; };
+    if (!provider.empty()) add("Provider[@Name='" + provider + "']");
+    if (!ids.empty()) {
+      std::string any;
+      for (const std::uint32_t id : ids) {
+        any += (any.empty() ? "" : " or ") + std::string("EventID=") + std::to_string(id);
+      }
+      add("(" + any + ")");
+    }
+    add("TimeCreated[timediff(@SystemTime) <= " + std::to_string(static_cast<std::uint64_t>(max_age_days) * 86400000ull) +
+        "]");
+    const std::string query = "*[System[" + cond + "]]";
+
+    const std::wstring wchannel = util::utf8_to_wide(channel);
+    const std::wstring wquery = util::utf8_to_wide(query);
+    EVT_HANDLE result =
+        EvtQuery(nullptr, wchannel.c_str(), wquery.c_str(), EvtQueryChannelPath | EvtQueryReverseDirection);
+    if (!result) return out;
+
+    while (static_cast<int>(out.size()) < max_count) {
+      EVT_HANDLE batch[16];
+      DWORD returned = 0;
+      if (!EvtNext(result, 16, batch, 5000, 0, &returned) || returned == 0) break;
+      for (DWORD i = 0; i < returned; ++i) {
+        if (static_cast<int>(out.size()) < max_count) render_into(batch[i], channel, out);
+        EvtClose(batch[i]);
+      }
+    }
+    EvtClose(result);
+    return out;
+  }
+
  private:
+  static void render_into(EVT_HANDLE event, const std::string& channel, std::vector<EventRecord>& out) {
+    DWORD used = 0, props = 0;
+    std::wstring buf(4096, L'\0');
+    BOOL ok = EvtRender(nullptr, event, EvtRenderEventXml, static_cast<DWORD>(buf.size() * sizeof(wchar_t)),
+                        buf.data(), &used, &props);
+    if (!ok && GetLastError() == ERROR_INSUFFICIENT_BUFFER && used > 0 && used < (16u << 20)) {
+      buf.assign(used / sizeof(wchar_t) + 1, L'\0');
+      ok = EvtRender(nullptr, event, EvtRenderEventXml, static_cast<DWORD>(buf.size() * sizeof(wchar_t)), buf.data(),
+                     &used, &props);
+    }
+    if (!ok) return;
+    buf.resize(wcsnlen(buf.c_str(), buf.size()));
+    EventRecord rec;
+    if (!parse_event_xml(wide_to_utf8(buf), rec)) return;
+    if (rec.channel.empty()) rec.channel = channel;
+    out.push_back(std::move(rec));
+  }
+
   // Maps the native System32 to Sysnative when we are a WOW64 process.
   fs::path physical(const fs::path& p) const {
     if (!wow64_) return p;

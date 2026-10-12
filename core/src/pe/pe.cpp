@@ -605,6 +605,8 @@ ParseResult parse_impl(std::span<const std::uint8_t> data) {
     dirs[i].size = le32(o + fixed + std::size_t{i} * 8 + 4);
   }
 
+  info.security_dir_size = dirs[4].size;  // IMAGE_DIRECTORY_ENTRY_SECURITY (rva = file offset)
+
   // Section table.
   Parser parser(data, info);
   if (nsections > kMaxSections) {

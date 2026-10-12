@@ -7,26 +7,15 @@
 #include <map>
 #include <set>
 
+#include "diagnose/internal.h"
 #include "kb/json.h"
 #include "neden/version.h"
 #include "util/text.h"
 
 namespace neden::diagnose {
 
-namespace {
+namespace detail {
 
-using resolve::Location;
-using resolve::Module;
-using util::to_lower_ascii;
-
-// Picks the string for the report language.
-struct Tr {
-  const char* en;
-  const char* tr;
-  std::string operator()(Lang lang) const { return lang == Lang::Tr ? tr : en; }
-};
-
-// Replaces {0}, {1}, ... in pattern.
 std::string format(std::string pattern, std::initializer_list<std::string> args) {
   std::size_t i = 0;
   for (const std::string& a : args) {
@@ -38,9 +27,50 @@ std::string format(std::string pattern, std::initializer_list<std::string> args)
   return pattern;
 }
 
-std::string arch_of(pe::Machine m) { return pe::machine_name(m); }
+Fix make_package_fix(const kb::Package& pkg, const std::string& arch, const env::Environment& env, Lang lang) {
+  Fix fix;
+  fix.package_id = pkg.id;
+  fix.package_name = pkg.name;
+  fix.arch = arch;
+  fix.winget_id = pkg.winget_for(arch);
+  fix.url = pkg.url_for(arch);
+  fix.info_url = pkg.info_url;
+  if (pkg.kind == "windows-feature") {
+    fix.steps = format(Tr{"Turn on \"{0}\" in Windows Features.", "Windows Özellikleri'nden \"{0}\" seçeneğini açın."}(lang),
+                       {pkg.name});
+  } else if (pkg.kind == "os-update") {
+    fix.steps = format(Tr{"Install all Windows updates; {0} is delivered through Windows Update. On Windows 10 and "
+                          "later it is built in, so if it is missing there, Windows files are damaged (run "
+                          "\"sfc /scannow\" as administrator).",
+                          "Tüm Windows güncellemelerini yükleyin; {0} Windows Update üzerinden gelir. Windows 10 "
+                          "ve sonrasında zaten yerleşiktir; orada eksikse Windows dosyaları bozulmuştur (yönetici "
+                          "olarak \"sfc /scannow\" çalıştırın)."}(lang),
+                       {pkg.name});
+  } else {
+    fix.steps = format(Tr{"Install {0} ({1}) from the official source.",
+                          "{0} ({1}) paketini resmi kaynağından kurun."}(lang),
+                       {pkg.name, arch});
+    if (arch == "x86" && env.os().is_64bit) {
+      fix.steps += Tr{" This program is 32-bit, so it needs the x86 version even on 64-bit Windows.",
+                      " Bu program 32-bit olduğu için 64-bit Windows'ta bile x86 sürümüne ihtiyaç duyar."}(lang);
+    }
+  }
+  return fix;
+}
 
-std::string u8(const std::filesystem::path& p) { return util::wide_to_utf8(p.wstring()); }
+}  // namespace detail
+
+namespace {
+
+using resolve::Location;
+using resolve::Module;
+using util::to_lower_ascii;
+
+using detail::format;
+using detail::Tr;
+using detail::u8;
+
+std::string arch_of(pe::Machine m) { return pe::machine_name(m); }
 
 std::string os_string(const env::OsInfo& os) {
   return "Windows " + std::to_string(os.major) + "." + std::to_string(os.minor) + "." + std::to_string(os.build) +
@@ -80,9 +110,24 @@ class Diagnoser {
       }
     }
 
-    if (std::none_of(findings_.begin(), findings_.end(),
-                     [](const Finding& f) { return f.severity != Severity::Info; })) {
-      nothing_found();
+    const bool nothing = std::none_of(findings_.begin(), findings_.end(),
+                                      [](const Finding& f) { return f.severity != Severity::Info; });
+    if (nothing) nothing_found();
+
+    // Rules 8 and 9: what the machine itself recorded (event log, downloaded-file mark, Defender, Smart App
+    // Control). They run even when the file did not parse.
+    const std::size_t static_count = findings_.size();
+    detail::apply_system_rules({env_, kb_, lang_, program, res, arch_ == "unknown" ? std::string() : arch_},
+                               findings_);
+    if (nothing) {
+      // A machine-level cause that is a certain Error (e.g. Defender removed a file) makes "nothing found" misleading.
+      const bool cause = std::any_of(findings_.begin() + static_cast<std::ptrdiff_t>(static_count), findings_.end(),
+                                     [](const Finding& f) { return f.severity == Severity::Error; });
+      if (cause) {
+        findings_.erase(std::remove_if(findings_.begin(), findings_.end(),
+                                       [](const Finding& f) { return f.rule == "no-problem-found"; }),
+                        findings_.end());
+      }
     }
     std::stable_sort(findings_.begin(), findings_.end(), [](const Finding& a, const Finding& b) {
       if (a.severity != b.severity) return a.severity < b.severity;
@@ -348,36 +393,7 @@ class Diagnoser {
     return s;
   }
 
-  Fix package_fix(const kb::Package& pkg) const {
-    Fix fix;
-    fix.package_id = pkg.id;
-    fix.package_name = pkg.name;
-    fix.arch = arch_;
-    fix.winget_id = pkg.winget_for(arch_);
-    fix.url = pkg.url_for(arch_);
-    fix.info_url = pkg.info_url;
-    if (pkg.kind == "windows-feature") {
-      fix.steps = format(Tr{"Turn on \"{0}\" in Windows Features.", "Windows Özellikleri'nden \"{0}\" seçeneğini açın."}(lang_),
-                         {pkg.name});
-    } else if (pkg.kind == "os-update") {
-      fix.steps = format(Tr{"Install all Windows updates; {0} is delivered through Windows Update. On Windows 10 and "
-                            "later it is built in, so if it is missing there, Windows files are damaged (run "
-                            "\"sfc /scannow\" as administrator).",
-                            "Tüm Windows güncellemelerini yükleyin; {0} Windows Update üzerinden gelir. Windows 10 "
-                            "ve sonrasında zaten yerleşiktir; orada eksikse Windows dosyaları bozulmuştur (yönetici "
-                            "olarak \"sfc /scannow\" çalıştırın)."}(lang_),
-                         {pkg.name});
-    } else {
-      fix.steps = format(Tr{"Install {0} ({1}) from the official source.",
-                            "{0} ({1}) paketini resmi kaynağından kurun."}(lang_),
-                         {pkg.name, arch_});
-      if (arch_ == "x86" && env_.os().is_64bit) {
-        fix.steps += Tr{" This program is 32-bit, so it needs the x86 version even on 64-bit Windows.",
-                        " Bu program 32-bit olduğu için 64-bit Windows'ta bile x86 sürümüne ihtiyaç duyar."}(lang_);
-      }
-    }
-    return fix;
-  }
+  Fix package_fix(const kb::Package& pkg) const { return detail::make_package_fix(pkg, arch_, env_, lang_); }
 
   void missing_runtime(const kb::Package& pkg, const std::vector<const Module*>& modules, bool delay_only) {
     Finding f;
