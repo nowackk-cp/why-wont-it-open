@@ -63,7 +63,7 @@ jobs:
         run: |
           $v = "${{ github.ref_name }}"
           $notes = @"
-          **Download:** ``WhyWontItOpen-$v-x86.exe`` (single file, no installation, runs on 32- and 64-bit Windows 7–11).
+          **Download:** ``WhyWontItOpen-$v-x86.exe`` (single file, no installation, 32- and 64-bit Windows 10/11).
 
           Verify the download:
           ``````
