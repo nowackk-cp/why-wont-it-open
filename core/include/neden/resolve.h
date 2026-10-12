@@ -3,6 +3,8 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,10 @@ struct Module {
 
 struct Options {
   int max_modules = 400;
+  // True for DLL names that belong to a redistributable package rather than
+  // to Windows itself. Such DLLs are walked even when they live in the system
+  // dir (e.g. vcruntime140.dll -> api-ms-win-crt-*); Windows' own DLLs are not.
+  std::function<bool(std::string_view)> is_redistributable;
 };
 
 struct Result {

@@ -6,6 +6,7 @@
 #include <memory>
 #include <set>
 #include <unordered_set>
+#include <cstring>
 #include <cwctype>
 
 #include "util/text.h"
@@ -102,11 +103,20 @@ class Resolver {
     const pe::PeInfo& info = *target->parse.info;
     process_ = process_machine(info, env_.os());
     result.process_machine = process_;
-    const bool wow = env_.os().is_64bit && (process_ == pe::Machine::I386 || process_ == pe::Machine::ARMNT);
-    system_dir_ = wow ? env_.syswow64_dir() : env_.system_dir();
+    wow_ = env_.os().is_64bit && (process_ == pe::Machine::I386 || process_ == pe::Machine::ARMNT);
+    system_dir_ = wow_ ? env_.syswow64_dir() : env_.system_dir();
     result.system_dir = system_dir_;
     app_dir_ = program_.parent_path();
     for (const std::string& k : env_.known_dlls()) known_.insert(to_lower_ascii(k));
+
+    // Side-by-side assemblies the program asks for in its manifest (e.g. Common Controls 6).
+    std::string manifest = info.manifest;
+    if (manifest.empty()) {
+      fs::path external = program_;
+      external += ".manifest";
+      if (auto m = env_.read_file(external, 1024 * 1024)) manifest.assign(m->begin(), m->end());
+    }
+    load_sxs_assemblies(manifest);
 
     for (const pe::ImportedDll& imp : info.imports) {
       queue_.push_back(Edge{"", false, to_lower_ascii(imp.name), &imp.functions, target, imp.delay_load, 1});
@@ -121,6 +131,105 @@ class Resolver {
   }
 
  private:
+  // A 32-bit process on 64-bit Windows sees System32 as SysWOW64.
+  fs::path for_process(const fs::path& p) const {
+    if (!wow_) return p;
+    const std::wstring sys32 = to_lower_w((env_.windows_dir() / "System32").wstring());
+    const std::wstring s = p.wstring();
+    const std::wstring lower = to_lower_w(s);
+    if (lower.starts_with(sys32) && (lower.size() == sys32.size() || lower[sys32.size()] == L'\\')) {
+      return fs::path(env_.syswow64_dir().wstring() + s.substr(sys32.size()));
+    }
+    return p;
+  }
+
+  static std::wstring to_lower_w(std::wstring s) {
+    for (wchar_t& c : s) c = static_cast<wchar_t>(towlower(c));
+    return s;
+  }
+
+  // Reads attribute `name` from an XML start tag (very small, tolerant parser).
+  static std::string xml_attr(std::string_view tag, std::string_view name) {
+    std::size_t pos = 0;
+    while ((pos = tag.find(name, pos)) != std::string_view::npos) {
+      const bool boundary = pos == 0 || tag[pos - 1] == ' ' || tag[pos - 1] == '\t' || tag[pos - 1] == '\n' ||
+                            tag[pos - 1] == '\r';
+      std::size_t p = pos + name.size();
+      while (p < tag.size() && (tag[p] == ' ' || tag[p] == '\t')) ++p;
+      if (boundary && p < tag.size() && tag[p] == '=') {
+        ++p;
+        while (p < tag.size() && (tag[p] == ' ' || tag[p] == '\t')) ++p;
+        if (p < tag.size() && (tag[p] == '"' || tag[p] == '\'')) {
+          const char quote = tag[p];
+          const std::size_t end = tag.find(quote, p + 1);
+          if (end != std::string_view::npos) return std::string(tag.substr(p + 1, end - p - 1));
+        }
+      }
+      pos += name.size();
+    }
+    return {};
+  }
+
+  void load_sxs_assemblies(const std::string& manifest_text) {
+    if (manifest_text.empty()) return;
+    const std::string text = to_lower_ascii(manifest_text);
+    const fs::path winsxs = env_.windows_dir() / "WinSxS";
+    std::size_t pos = 0;
+    while ((pos = text.find("<dependentassembly", pos)) != std::string::npos) {
+      const std::size_t id = text.find("assemblyidentity", pos);
+      if (id == std::string::npos) break;
+      const std::size_t end = text.find('>', id);
+      if (end == std::string::npos) break;
+      const std::string_view tag(text.data() + id, end - id);
+      pos = end;
+
+      const std::string name = xml_attr(tag, "name");
+      const std::string version = xml_attr(tag, "version");
+      const std::string token = xml_attr(tag, "publickeytoken");
+      std::string arch = xml_attr(tag, "processorarchitecture");
+      if (name.empty()) continue;
+      if (token.empty()) {
+        // Private assembly: a folder next to the program (Chrome's "<version>\",
+        // Blender's "blender.shared\").
+        const fs::path dir = app_dir_ / name;
+        if (env_.dir_exists(dir)) sxs_dirs_.push_back(dir);
+        continue;
+      }
+      if (arch.empty() || arch == "*") {
+        const char* p = sxs_arch_prefix(process_);
+        if (!p) continue;
+        arch.assign(p, std::strlen(p) - 1);
+      }
+      // Servicing policy redirects to the newest build with the same major.minor.
+      const std::string major_minor = version.substr(0, version.find('.', version.find('.') + 1));
+      const std::string prefix = arch + "_" + name + "_" + token + "_" + major_minor;
+      std::vector<std::string> dirs = env_.list_dir(winsxs, prefix);
+      std::sort(dirs.begin(), dirs.end(), [](const std::string& a, const std::string& b) {
+        return version_key(a) > version_key(b);
+      });
+      if (!dirs.empty()) sxs_dirs_.push_back(winsxs / dirs.front());
+    }
+  }
+
+  // "x86_name_token_6.0.19041.1110_none_hash" -> {6, 0, 19041, 1110}
+  static std::vector<int> version_key(const std::string& dir) {
+    std::vector<int> key;
+    std::size_t start = 0;
+    for (int i = 0; i < 3 && start != std::string::npos; ++i) start = dir.find('_', start + 1);
+    if (start == std::string::npos) return key;
+    int cur = 0;
+    for (std::size_t i = start + 1; i < dir.size() && dir[i] != '_'; ++i) {
+      if (dir[i] == '.') {
+        key.push_back(cur);
+        cur = 0;
+      } else if (dir[i] >= '0' && dir[i] <= '9') {
+        cur = cur * 10 + (dir[i] - '0');
+      }
+    }
+    key.push_back(cur);
+    return key;
+  }
+
   static pe::Machine process_machine(const pe::PeInfo& info, const env::OsInfo& os) {
     // AnyCPU .NET programs run as a native 64-bit process on 64-bit Windows.
     if (info.clr && info.clr->il_only() && !info.clr->requires_32bit() && !info.clr->prefers_32bit() &&
@@ -175,6 +284,18 @@ class Resolver {
       // Older Windows without a schema entry: fall back to physical stub DLLs.
     }
 
+    // Activation context (manifest) redirection comes before the search order.
+    for (const fs::path& dir : sxs_dirs_) {
+      const fs::path file = dir / name;
+      if (env_.file_exists(file)) {
+        m.location = Location::SxS;
+        m.path = file;
+        m.machine = process_;
+        m.system_owned = true;
+        return m;
+      }
+    }
+
     if (known_.count(name)) {
       m.location = Location::KnownDll;
       m.path = system_dir_ / name;
@@ -187,10 +308,10 @@ class Resolver {
       fs::path path;
       Location location;
     };
-    std::vector<Dir> dirs = {{app_dir_, Location::AppDir},
+    std::vector<Dir> dirs = {{for_process(app_dir_), Location::AppDir},
                              {system_dir_, Location::SystemDir},
                              {env_.windows_dir(), Location::WindowsDir}};
-    for (const fs::path& p : env_.path_dirs()) dirs.push_back({p, Location::PathDir});
+    for (const fs::path& p : env_.path_dirs()) dirs.push_back({for_process(p), Location::PathDir});
 
     std::set<std::wstring> seen;
     for (const Dir& d : dirs) {
@@ -211,7 +332,10 @@ class Resolver {
     const Candidate& first = m.candidates.front();
     m.path = first.path;
     m.location = first.location;
-    m.system_owned = first.location == Location::SystemDir || first.location == Location::WindowsDir;
+    // Judge by the folder, not the label: a program inside System32 has app dir == system dir.
+    const std::wstring parent = to_lower_w(first.path.parent_path().lexically_normal().wstring());
+    m.system_owned = parent == to_lower_w(system_dir_.lexically_normal().wstring()) ||
+                     parent == to_lower_w(env_.windows_dir().lexically_normal().wstring());
     const Image& image = load(first.path);
     if (!image.parse.ok()) {
       m.invalid_image = true;
@@ -242,16 +366,17 @@ class Resolver {
 
   void enqueue_dependencies(const Module& m, int depth) {
     if (m.path.empty() || m.invalid_image || m.arch_mismatch) return;
-    if (m.location == Location::KnownDll || m.location == Location::ApiSet || m.location == Location::SxS) return;
+    if (m.location == Location::KnownDll || m.location == Location::ApiSet) return;
+    // Windows' own DLLs are consistent with the Windows they ship with; their
+    // internals (optional delay-loads, edition-specific API sets) are not the
+    // user's problem. Redistributable runtimes in the system dir are walked.
+    const bool redistributable = options_.is_redistributable && options_.is_redistributable(m.name);
+    if (m.system_owned && !redistributable) return;
     auto image = load_shared(m.path);
     if (!image->parse.ok()) return;
     for (const pe::ImportedDll& imp : image->parse.info->imports) {
       const std::string dll = to_lower_ascii(imp.name);
-      if (m.system_owned) {
-        // Windows' own DLLs delay-load optional components and extension API
-        // sets that are legitimately absent on many editions.
-        if (imp.delay_load || dll.starts_with("ext-ms-")) continue;
-      }
+      if (m.system_owned && imp.delay_load) continue;
       queue_.push_back(Edge{m.name, m.system_owned, dll, &imp.functions, image, imp.delay_load || m.delay_only,
                             depth + 1});
     }
@@ -321,6 +446,8 @@ class Resolver {
   pe::Machine process_ = pe::Machine::Unknown;
   fs::path system_dir_;
   fs::path app_dir_;
+  bool wow_ = false;
+  std::vector<fs::path> sxs_dirs_;
   std::unordered_set<std::string> known_;
   std::deque<Edge> queue_;
   std::map<std::string, std::size_t> index_;

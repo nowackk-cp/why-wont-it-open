@@ -56,7 +56,12 @@ class Diagnoser {
     report.program = program;
     report.lang = lang_;
     report.os = os_string(env_.os());
-    report.resolution = resolve::resolve(program, env_);
+    resolve::Options options;
+    options.is_redistributable = [this](std::string_view name) {
+      const kb::DllEntry* e = kb_.find_dll(name);
+      return e && !e->package.empty() && !e->program_file && !e->gpu_driver;
+    };
+    report.resolution = resolve::resolve(program, env_, options);
     const resolve::Result& res = report.resolution;
     program_name_ = to_lower_ascii(u8(program.filename()));
 

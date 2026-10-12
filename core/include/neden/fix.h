@@ -29,6 +29,10 @@ bool winget_available();
 // until winget exits. Agreements are NOT auto-accepted.
 Outcome install_with_winget(const std::string& winget_id);
 
+// True if id is a plausible winget package id: non-empty, at most 128 chars,
+// only letters, digits, '.', '+', '-' and '_' (prevents command injection).
+bool is_valid_winget_id(const std::string& id);
+
 // True if url is https and its host is on the official allow-list
 // (microsoft.com and subdomains, aka.ms, visualstudio.microsoft.com,
 // dotnet.microsoft.com, nvidia.com and subdomains, ...).
@@ -46,6 +50,12 @@ SignatureInfo verify_signature(const std::filesystem::path& file);
 
 // Progress callback: bytes received, total bytes (0 if unknown). Return false to cancel.
 using Progress = std::function<bool(std::uint64_t received, std::uint64_t total)>;
+
+// The download + verify half of download_verify_run, without running anything.
+// On success *out (if non-null) is the verified file inside a fresh folder
+// under %TEMP% that the caller must delete. On failure nothing is left behind.
+Outcome download_and_verify(const std::string& url, const std::string& expected_signer, const Progress& progress,
+                            std::filesystem::path* out);
 
 // Downloads url to a fresh per-run folder under %TEMP%, verifies that the
 // signature is valid and the signer equals expected_signer (case-insensitive),

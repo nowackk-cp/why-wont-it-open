@@ -18,4 +18,4 @@ file(GLOB_RECURSE NEDEN_CORE_HEADERS CONFIGURE_DEPENDS
 add_library(neden_core STATIC ${NEDEN_CORE_SOURCES} ${NEDEN_CORE_HEADERS} "${NEDEN_KB_CPP}")
 target_include_directories(neden_core PUBLIC include PRIVATE src)
 target_compile_definitions(neden_core PRIVATE NEDEN_VERSION="${PROJECT_VERSION}")
-target_link_libraries(neden_core PUBLIC advapi32 shlwapi)
+target_link_libraries(neden_core PUBLIC advapi32 shlwapi wintrust crypt32 winhttp)

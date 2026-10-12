@@ -6,6 +6,10 @@
 #include <string_view>
 #include <vector>
 
+#include "fix_command.h"
+#include "neden/diagnose.h"
+#include "neden/env.h"
+#include "neden/kb.h"
 #include "neden/pe.h"
 #include "neden/version.h"
 
@@ -15,8 +19,11 @@ void print_usage() {
   std::puts(
       "Usage:\n"
       "  neden --version\n"
-      "  neden info <file.exe> [--verbose]  show what the PE file contains\n"
-      "  neden check <file.exe> [--json]    (planned, M2)");
+      "  neden check <file.exe> [--json] [--lang en|tr]  find out why a program won't start\n"
+      "  neden fix <file.exe> [--yes]                    install the official fixes (asks first)\n"
+      "  neden info <file.exe> [--verbose]               show what the PE file contains\n"
+      "\n"
+      "Exit codes of 'check': 0 no problem found, 2 cannot analyse, 3 problems found.");
 }
 
 std::string to_utf8(const std::wstring& w) {
@@ -144,6 +151,46 @@ int run_info(const std::vector<std::wstring>& args) {
   return 0;
 }
 
+int run_check(const std::vector<std::wstring>& args) {
+  bool json = false;
+  neden::diagnose::Lang lang = neden::diagnose::default_lang();
+  std::wstring file;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::wstring& a = args[i];
+    if (a == L"--json") {
+      json = true;
+    } else if (a == L"--lang" && i + 1 < args.size()) {
+      const std::wstring& l = args[++i];
+      if (l == L"tr") {
+        lang = neden::diagnose::Lang::Tr;
+      } else if (l == L"en") {
+        lang = neden::diagnose::Lang::En;
+      } else {
+        print_usage();
+        return 1;
+      }
+    } else if (file.empty()) {
+      file = a;
+    } else {
+      print_usage();
+      return 1;
+    }
+  }
+  if (file.empty()) {
+    print_usage();
+    return 1;
+  }
+
+  const auto env = neden::env::make_system_environment();
+  const std::filesystem::path path = std::filesystem::absolute(std::filesystem::path(file));
+  const neden::diagnose::Report report =
+      neden::diagnose::diagnose(path, *env, neden::kb::KnowledgeBase::embedded(), lang);
+  const std::string out = json ? neden::diagnose::to_json(report) : neden::diagnose::to_text(report);
+  std::fwrite(out.data(), 1, out.size(), stdout);
+  if (!report.resolution.target.ok()) return 2;
+  return report.has_errors() ? 3 : 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -156,6 +203,12 @@ int wmain(int argc, wchar_t** argv) {
   if (cmd == L"--version" || cmd == L"-v") {
     std::printf("neden %.*s\n", static_cast<int>(neden::version().size()), neden::version().data());
     return 0;
+  }
+  if (cmd == L"check") {
+    return run_check(std::vector<std::wstring>(argv + 2, argv + argc));
+  }
+  if (cmd == L"fix") {
+    return run_fix_command(std::vector<std::wstring>(argv + 2, argv + argc));
   }
   if (cmd == L"info") {
     return run_info(std::vector<std::wstring>(argv + 2, argv + argc));
