@@ -15,7 +15,7 @@ jobs:
       matrix:
         config: [Release, Debug]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Configure (x86)
         run: cmake -S . -B build -A Win32
@@ -26,9 +26,53 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.config }} --output-on-failure
 
-      - name: Upload binary
+      - name: Smoke test the CLI on system programs
         if: matrix.config == 'Release'
-        uses: actions/upload-artifact@v5
+        shell: pwsh
+        run: |
+          foreach ($exe in "$env:windir\SysWOW64\notepad.exe", "$env:windir\System32\notepad.exe") {
+            ./build/cli/Release/neden.exe check $exe --json | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "neden check reported problems for $exe (exit $LASTEXITCODE)" }
+          }
+
+      - name: Upload binaries
+        if: matrix.config == 'Release'
+        uses: actions/upload-artifact@v7
         with:
-          name: neden-x86
-          path: build/cli/Release/neden.exe
+          name: why-wont-it-open-x86
+          path: |
+            build/cli/Release/neden.exe
+            build/gui/Release/WhyWontItOpen.exe
+          if-no-files-found: error
+
+  fuzz:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure fuzz target
+        run: cmake -S . -B build -A Win32 -DNEDEN_FUZZ=ON -DBUILD_TESTING=OFF
+
+      - name: Build fuzz target
+        run: cmake --build build --config Release --target fuzz_pe
+
+      - name: Fuzz the PE parser for 2 minutes
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $asan = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx86\x86\clang_rt.asan_dynamic-i386.dll" | Select-Object -First 1
+          $env:PATH = "$($asan.DirectoryName);$env:PATH"
+          New-Item -ItemType Directory -Force build/fuzz-work | Out-Null
+          ./build/fuzz/Release/fuzz_pe.exe -max_total_time=120 -max_len=8192 build/fuzz-work fuzz/corpus
+          if ($LASTEXITCODE -ne 0) { throw "fuzzer found a crash" }
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

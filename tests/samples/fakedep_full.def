@@ -1,0 +1,4 @@
+LIBRARY fakedep
+EXPORTS
+  fakedep_init
+  fakedep_run

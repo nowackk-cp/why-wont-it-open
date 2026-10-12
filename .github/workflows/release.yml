@@ -1,0 +1,74 @@
+name: release
+
+# Push a tag like v0.2.0 to build, test, attest and publish a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write       # create the GitHub release
+  id-token: write       # sign build provenance
+  attestations: write   # store the attestation
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check that the tag matches the project version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $line = Select-String -Path CMakeLists.txt -Pattern 'project\(why_wont_it_open VERSION ([0-9.]+)'
+          $version = $line.Matches[0].Groups[1].Value
+          if ($tag -ne $version) { throw "tag v$tag does not match CMakeLists.txt version $version" }
+
+      - name: Configure (x86)
+        run: cmake -S . -B build -A Win32
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/gui/Release/WhyWontItOpen.exe "dist/WhyWontItOpen-$v-x86.exe"
+          Copy-Item build/cli/Release/neden.exe "dist/neden-$v-x86.exe"
+          Compress-Archive -Path build/gui/Release/WhyWontItOpen.exe, build/cli/Release/neden.exe, LICENSE, README.md `
+            -DestinationPath "dist/why-wont-it-open-$v-x86.zip"
+          Push-Location dist
+          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ github.ref_name }}"
+          $notes = @"
+          **Download:** ``WhyWontItOpen-$v-x86.exe`` (single file, no installation, runs on 32- and 64-bit Windows 7–11).
+
+          Verify the download:
+          ``````
+          gh attestation verify WhyWontItOpen-$v-x86.exe --repo ${{ github.repository }}
+          ``````
+          SHA256 checksums are in ``SHA256SUMS.txt``.
+          "@
+          gh release create $v dist/* --title "Why Won't It Open? $v" --notes $notes --generate-notes
