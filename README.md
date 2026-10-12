@@ -74,6 +74,13 @@ neden info game.exe --verbose       # what the PE file contains
 `check` exits with 0 when no problem was found, 3 when problems were found and 2 when the file
 could not be analysed.
 
+Optional Explorer right-click entry for `.exe` and `.dll` files (per user, no admin rights):
+
+```bash
+WhyWontItOpen.exe --register-shell
+WhyWontItOpen.exe --unregister-shell
+```
+
 ## Building
 
 Requires Visual Studio 2022 or newer (Desktop development with C++) and CMake ≥ 3.21.

@@ -7,6 +7,10 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <string>
+#include <vector>
 #include <memory>
 #include <thread>
 
@@ -513,9 +517,51 @@ void MainWindow::on_action(size_t card, Action action) {
         MessageBoxW(hwnd_, tr(S::ClipboardFailed), tr(S::WindowTitle), MB_OK | MB_ICONWARNING);
       }
       break;
+    case Action::ReportUnknown: report_unknown(*f); break;
     case Action::InstallWinget: start_fix(card, true); break;
     case Action::DownloadInstall: start_fix(card, false); break;
   }
+}
+
+// Opens a pre-filled GitHub issue that contains nothing but the DLL names.
+void MainWindow::report_unknown(const neden::diagnose::Finding& f) {
+  std::vector<std::string> names;
+  for (const std::string& e : f.evidence) {
+    const std::string name = e.substr(0, e.find(' '));
+    const bool plausible = name.size() > 4 && name.size() < 100 &&
+                           _stricmp(name.c_str() + name.size() - 4, ".dll") == 0 &&
+                           name.find_first_of("\\/:%") == std::string::npos;
+    if (plausible && std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+  }
+  if (names.empty()) return;
+
+  std::string list;
+  for (const std::string& n : names) list += (list.empty() ? "" : "\n") + n;
+  wchar_t msg[2048];
+  swprintf_s(msg, tr(S::ConfirmReport), widen(list).c_str());
+  if (MessageBoxW(hwnd_, msg, tr(S::ReportUnknown), MB_OKCANCEL | MB_ICONINFORMATION) != IDOK) return;
+
+  auto encode = [](const std::string& s) {
+    std::string out;
+    for (const unsigned char c : s) {
+      if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+        out += static_cast<char>(c);
+      } else {
+        char buf[4];
+        std::snprintf(buf, sizeof(buf), "%%%02X", c);
+        out += buf;
+      }
+    }
+    return out;
+  };
+  std::string title = "Unknown DLL: " + names.front();
+  if (names.size() > 1) title += " (+" + std::to_string(names.size() - 1) + ")";
+  std::string body = "The tool did not know which package provides these DLLs:\n\n";
+  for (const std::string& n : names) body += "- `" + n + "`\n";
+  body += "\nWhich program or package do they belong to (if you know)?\n";
+  const std::string url = "https://github.com/nowackk-cp/why-wont-it-open/issues/new?labels=unknown-dll&title=" +
+                          encode(title) + "&body=" + encode(body);
+  ShellExecuteW(hwnd_, L"open", widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 void MainWindow::start_fix(size_t card, bool winget) {

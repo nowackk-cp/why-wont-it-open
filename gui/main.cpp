@@ -1,6 +1,7 @@
 // Why Won't It Open? - GUI entry point.
 //
 //   WhyWontItOpen.exe [--lang tr|en] [file.exe]
+//   WhyWontItOpen.exe --register-shell | --unregister-shell   (Explorer right-click entry, per user)
 //
 // The analysed program is only ever read by neden_core; this file never loads
 // or starts it.
@@ -12,6 +13,7 @@
 
 #include <string>
 
+#include "shell_menu.h"
 #include "strings.h"
 #include "theme.h"
 #include "window.h"
@@ -21,6 +23,7 @@ namespace {
 struct Args {
   std::wstring file;
   bool has_lang = false;
+  int shell_menu = 0;  // 1 register, -1 unregister
   neden::diagnose::Lang lang = neden::diagnose::Lang::En;
 };
 
@@ -40,6 +43,10 @@ Args parse_args() {
         a.has_lang = true;
         a.lang = neden::diagnose::Lang::En;
       }
+    } else if (arg == L"--register-shell") {
+      a.shell_menu = 1;
+    } else if (arg == L"--unregister-shell") {
+      a.shell_menu = -1;
     } else if (arg == L"--theme" && i + 1 < argc) {
       const std::wstring v = argv[++i];
       gui::g_theme_override = _wcsicmp(v.c_str(), L"dark") == 0 ? 1 : (_wcsicmp(v.c_str(), L"light") == 0 ? 0 : -1);
@@ -60,6 +67,11 @@ Args parse_args() {
 int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int show) {
   const Args args = parse_args();
   gui::set_language(args.has_lang ? args.lang : neden::diagnose::default_lang());
+
+  if (args.shell_menu != 0) {
+    const bool ok = args.shell_menu > 0 ? gui::register_shell_menu() : gui::unregister_shell_menu();
+    return ok ? 0 : 1;
+  }
 
   if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return 1;
   INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_LINK_CLASS};

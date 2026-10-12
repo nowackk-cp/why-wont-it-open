@@ -67,6 +67,13 @@ const Entry kTable[] = {
      L"https://github.com/nowackk-cp/why-wont-it-open"},
     {L"Close", L"Kapat"},
     {L"The clipboard could not be opened.", L"Panoya erişilemedi."},
+    {L"Report unknown DLL", L"Bilinmeyen DLL'i bildir"},
+    {L"This opens a new GitHub issue in your browser so the DLL can be added to the knowledge base.\n\n"
+     L"Only these file names are included - nothing else about you or your computer:\n\n%s\n\n"
+     L"You can review and edit the issue before submitting it.",
+     L"Bu, DLL'in bilgi tabanına eklenebilmesi için tarayıcınızda yeni bir GitHub issue açar.\n\n"
+     L"Yalnızca şu dosya adları eklenir; sizinle ya da bilgisayarınızla ilgili başka hiçbir şey eklenmez:\n\n%s\n\n"
+     L"Göndermeden önce issue'yu inceleyip düzenleyebilirsiniz."},
 };
 static_assert(sizeof(kTable) / sizeof(kTable[0]) == static_cast<size_t>(S::Count_), "string table out of sync");
 

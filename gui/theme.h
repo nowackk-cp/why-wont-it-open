@@ -11,7 +11,7 @@ constexpr UINT WM_APP_FIX_PROGRESS = WM_APP + 2;  // wParam: percent (-1 unknown
 constexpr UINT WM_APP_FIX_DONE = WM_APP + 3;      // lParam: FixResult* (owned by the receiver)
 constexpr UINT WM_APP_ACTION = WM_APP + 4;        // results view -> main: wParam card index, lParam Action
 
-enum class Action { InstallWinget = 0, DownloadInstall = 1, OpenPage = 2, CopyCommand = 3 };
+enum class Action { InstallWinget = 0, DownloadInstall = 1, OpenPage = 2, CopyCommand = 3, ReportUnknown = 4 };
 
 struct Colors {
   bool dark = false;

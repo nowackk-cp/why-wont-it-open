@@ -41,6 +41,7 @@ class MainWindow {
   void on_action(size_t card, Action action);
   void on_fix_done(LPARAM lp);
   void start_fix(size_t card, bool winget);
+  void report_unknown(const neden::diagnose::Finding& f);
   void copy_report();
   void show_about();
   void set_busy_inputs(bool busy);

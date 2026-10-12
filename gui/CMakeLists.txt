@@ -8,6 +8,7 @@ add_executable(neden-gui WIN32
   theme.cpp
   strings.cpp
   fix_actions.cpp
+  shell_menu.cpp
   "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
 set_target_properties(neden-gui PROPERTIES OUTPUT_NAME "WhyWontItOpen")
 target_include_directories(neden-gui PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

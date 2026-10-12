@@ -44,6 +44,8 @@ enum class S {
   AboutBody,       // %s version
   Close,
   ClipboardFailed,
+  ReportUnknown,
+  ConfirmReport,   // %s list of DLL names
   Count_
 };
 

@@ -265,6 +265,7 @@ void ResultsView::set_report(const neden::diagnose::Report& report, bool winget_
       }
       if (fx.info_url.rfind("https://", 0) == 0) add(Action::OpenPage, S::OfficialPage);
       if (!fx.command.empty()) add(Action::CopyCommand, S::CopyCommand);
+      if (fd.rule == "missing-program-file" && !fd.certain) add(Action::ReportUnknown, S::ReportUnknown);
     }
   }
   relayout();
