@@ -21,10 +21,16 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
   message(WARNING "Release builds are expected to be 32-bit (x86). Configure with -A Win32.")
 endif()
 
+option(NEDEN_FUZZ "Build libFuzzer targets" OFF)
+
 add_subdirectory(core)
 add_subdirectory(cli)
 
 include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
+endif()
+
+if(NEDEN_FUZZ)
+  add_subdirectory(fuzz)
 endif()
