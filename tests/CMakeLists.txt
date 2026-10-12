@@ -1,3 +1,5 @@
-add_executable(neden_tests test_main.cpp)
+file(GLOB NEDEN_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
+add_executable(neden_tests ${NEDEN_TEST_SOURCES})
 target_link_libraries(neden_tests PRIVATE neden_core)
+target_include_directories(neden_tests PRIVATE "${PROJECT_SOURCE_DIR}/core/src")
 add_test(NAME neden_tests COMMAND neden_tests)

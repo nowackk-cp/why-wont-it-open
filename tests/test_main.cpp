@@ -1,34 +1,27 @@
-// Minimal self-contained test runner; no external dependencies.
-#include <cstdio>
-#include <string_view>
+#include <cstring>
 
-#include "neden/version.h"
+#include "test.h"
 
-namespace {
-
-int g_failures = 0;
-
-#define CHECK(expr)                                                     \
-  do {                                                                  \
-    if (!(expr)) {                                                      \
-      std::fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #expr); \
-      ++g_failures;                                                     \
-    }                                                                   \
-  } while (0)
-
-void test_version() {
-  CHECK(!neden::version().empty());
-  CHECK(neden::version().find('.') != std::string_view::npos);
-}
-
-}  // namespace
-
-int main() {
-  test_version();
-  if (g_failures != 0) {
-    std::fprintf(stderr, "%d check(s) failed\n", g_failures);
+int main(int argc, char** argv) {
+  const char* filter = argc > 1 ? argv[1] : nullptr;
+  int run = 0;
+  for (const auto& t : neden_test::registry()) {
+    if (filter && !std::strstr(t.name, filter)) continue;
+    ++run;
+    const int before = neden_test::failures();
+    try {
+      t.fn();
+    } catch (const neden_test::RequireFailed&) {
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "%s: unexpected exception: %s\n", t.name, e.what());
+      ++neden_test::failures();
+    }
+    std::printf("[%s] %s\n", neden_test::failures() == before ? " ok " : "FAIL", t.name);
+  }
+  if (neden_test::failures() != 0) {
+    std::fprintf(stderr, "%d check(s) failed\n", neden_test::failures());
     return 1;
   }
-  std::puts("all tests passed");
+  std::printf("%d test(s) passed\n", run);
   return 0;
 }
